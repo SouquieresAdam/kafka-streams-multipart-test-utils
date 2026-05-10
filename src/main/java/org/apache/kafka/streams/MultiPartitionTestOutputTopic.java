@@ -177,7 +177,7 @@ public class MultiPartitionTestOutputTopic<K, V> {
      * @return size of topic queue.
      */
     public final long getQueueSize() {
-        return driver.queueSize(topic);
+        return driver.getQueueSize(topic);
     }
 
     /**
