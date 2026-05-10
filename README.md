@@ -49,20 +49,29 @@ A worked-example project demonstrating all three risk exposures is at
 It runs the same topology under stock `TopologyTestDriver` and
 `MultiPartitionTopologyTestDriver` and pins each gap as an assertable, CI-failable signal.
 
-## Compatibility matrix
+## Which version do I depend on?
 
-| Branch | Kafka Streams range | Tested green | Notes |
-|---|---|---|---|
-| `main` | 4.4.0-SNAPSHOT (apache trunk) | local only | requires the upstream Kafka fork in `mavenLocal()` |
-| `kafka-4.1-4.2` | 4.1.0 – 4.2.0 | 4.1.2, 4.2.0 (16/16) | published Maven Central deps; default branch for Kafka 4.x users |
-| `kafka-4.0` | 4.0.2 only | 4.0.2 (16/16) | 3-arg `StreamsMetricsImpl` ctor |
-| `kafka-4.0-early` | 4.0.0 – 4.0.1 | 4.0.0, 4.0.1 (16/16) | 4-arg ctor; replays `task.updateNextOffsets()` to dodge pre-4.0.2 strict commit |
-| `kafka-3.7-3.9` | 3.7.x – 3.9.x | 3.7.2, 3.8.1, 3.9.2 (16/16) | lower bound of CFLT support; no plans to backport further |
+Pick the row that matches the Kafka version your Streams app uses. The artifact is
+published on Maven Central under `consulting.stream:kafka-streams-multipart-test-utils`.
+
+| Your Kafka version | Depend on        | Source branch (info) |
+|---|---|---|
+| 3.7.x              | `3.7.2-kip1238`  | `kafka-3.7-3.9`  |
+| 3.8.x              | `3.8.1-kip1238`  | `kafka-3.7-3.9`  |
+| 3.9.x              | `3.9.2-kip1238`  | `kafka-3.7-3.9`  |
+| 4.0.0 / 4.0.1      | `4.0.1-kip1238`  | `kafka-4.0-early` |
+| 4.0.2              | `4.0.2-kip1238`  | `kafka-4.0`      |
+| 4.1.x              | `4.1.2-kip1238`  | `kafka-4.1-4.2`  |
+| 4.2.0              | `4.2.0-kip1238`  | `kafka-4.1-4.2`  |
+| 4.4.0-SNAPSHOT (apache trunk) | not published — build from `main` and `publishToMavenLocal` | `main` |
+
+Each artifact is the same library code compiled and tested against the exact Kafka
+version in its name. The `Source branch` column is for maintainers; consumers only
+care about the first two columns.
 
 The package layout uses **split packages** (`org.apache.kafka.streams.*`) to access
 package-private internals. Kafka has no `module-info.java`, so this works on the
-classpath without `--add-opens`. Each branch produces an artefact tagged
-`<kafkaVersion>-kip1238`.
+classpath without `--add-opens`.
 
 Versions outside the table are **not supported**:
 - 3.0.x – 3.6.x — Confluent Platform support window has lapsed; the backport surface
@@ -78,11 +87,14 @@ cherry-pick.
 
 ## Usage
 
+Pick the version from the table above for your Kafka. For example, if you're on
+Kafka 3.9.2:
+
 ```xml
 <dependency>
   <groupId>consulting.stream</groupId>
   <artifactId>kafka-streams-multipart-test-utils</artifactId>
-  <version>${kafka.version}-kip1238</version>
+  <version>3.9.2-kip1238</version>
   <scope>test</scope>
 </dependency>
 ```
