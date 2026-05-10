@@ -1,24 +1,53 @@
 # kafka-streams-multipart-test-utils
 
+Catch Kafka Streams partitioning bugs in your unit tests, not on your prod migration.
+
 A standalone library that brings **multi-partition support** to Kafka Streams'
 `TopologyTestDriver`, implementing the contract described by
 [KIP-1238](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1238%3A+Multipartition+for+TopologyTestDriver+in+Kafka+Streams).
 
-While KIP-1238 progresses upstream, this library lets you exercise multi-partition
-topologies in unit tests today, without forking Kafka.
+## The problem this solves
 
-## What it gives you
+Kafka Streams' standard `TopologyTestDriver` runs every record through a single fake task
+with partition `0`. Tests pass with that fiction in place. Production then deploys the
+same topology against topics with `N>1` partitions, and three classes of bug surface for
+the first time:
 
-- `MultiPartitionTopologyTestDriver` — a drop-in companion to `TopologyTestDriver`
-  that:
-  - Honours `TestRecord.partition()` for explicit routing
-  - Routes by `Utils.murmur2(key) % n` (matches the production `BuiltInPartitioner`)
-  - Materialises one `StreamTask` per `(subtopologyId, partition)`
-  - Resolves repartition-topic partition counts via the 3-layer rule
-    (explicit > inheritance > max upstream)
-  - Exposes partition-aware state-store accessors:
-    `getStateStore(name, partition)`, `getStateStore(name, subtopologyId, partition)`
-- `MultiPartitionTestRecord` — extends `TestRecord` with an `Integer partition` field
+1. **Routing fidelity** — a missing `selectKey`, a changed key serializer, a custom
+   partitioner regression. Stock `TestRecord` has no partition field, so the test cannot
+   assert routing. The bug appears in production.
+2. **Silent state split** — two sources merged onto a shared store with mismatched
+   partition counts collapse into one task under stock TTD, giving a misleading green.
+   In production with `N>1`, the same key from each source side hashes to *different*
+   store partitions and the per-key state silently splits.
+3. **Partition count drift** — `Repartitioned.withNumberOfPartitions(N)` is invisible to
+   stock TTD. A change from `4` to `8` (or removal) drifts undetected until the migration.
+
+These bugs cost the most at the worst time: during a deploy, when the codebase has moved
+on, the original author isn't on call, and rolling back doesn't undo the partial
+state-store damage.
+
+## What this library gives you
+
+`MultiPartitionTopologyTestDriver` is a drop-in companion to `TopologyTestDriver` that
+closes the gaps above:
+
+- **One `StreamTask` per `(subtopologyId, partition)`**, not one task for the whole
+  topology — so per-partition state actually exists at test time.
+- **Production routing** via `Utils.murmur2(key) % n`, matching `BuiltInPartitioner`.
+  Honours `TestRecord.partition()` for explicit-routing tests.
+- **Repartition-topic partition counts** resolved by the 3-layer rule
+  (explicit > inheritance > max upstream).
+- **Per-partition state-store accessors:**
+  `getStateStore(name, partition)`, `getStateStore(name, subtopologyId, partition)`,
+  plus `partitionsOf(name)` to assert the topology's partitioning contract directly.
+- **`MultiPartitionTestRecord`** — extends `TestRecord` with an `Integer partition` so
+  output records carry the partition the production sink would produce to.
+
+A worked-example project demonstrating all three risk exposures is at
+[`kafka-streams-multipart-demo`](https://github.com/SouquieresAdam/kafka-streams-multipart-demo).
+It runs the same topology under stock `TopologyTestDriver` and
+`MultiPartitionTopologyTestDriver` and pins each gap as an assertable, CI-failable signal.
 
 ## Compatibility matrix
 
@@ -30,24 +59,22 @@ topologies in unit tests today, without forking Kafka.
 | `kafka-4.0-early` | 4.0.0 – 4.0.1 | 4.0.0, 4.0.1 (16/16) | 4-arg ctor; replays `task.updateNextOffsets()` to dodge pre-4.0.2 strict commit |
 | `kafka-3.7-3.9` | 3.7.x – 3.9.x | 3.7.2, 3.8.1, 3.9.2 (16/16) | lower bound of CFLT support; no plans to backport further |
 
-The package layout uses **split packages** (`org.apache.kafka.streams.*`) to
-access package-private internals. Kafka has no `module-info.java`, so this
-works on the classpath without `--add-opens`. Each branch produces an
-artefact tagged `<kafkaVersion>-kip1238`.
+The package layout uses **split packages** (`org.apache.kafka.streams.*`) to access
+package-private internals. Kafka has no `module-info.java`, so this works on the
+classpath without `--add-opens`. Each branch produces an artefact tagged
+`<kafkaVersion>-kip1238`.
 
 Versions outside the table are **not supported**:
-- 3.0.x – 3.6.x — Confluent Platform support window has lapsed; the
-  backport surface (50+ compile errors at 3.0.2, 7 at 3.6.2) is not
-  justified by demand.
+- 3.0.x – 3.6.x — Confluent Platform support window has lapsed; the backport surface
+  (50+ compile errors at 3.0.2, 7 at 3.6.2) is not justified by demand.
 
 ## Branch model
 
-`main` tracks `apache/trunk` and is the source of truth for the
-KIP-1238 multi-partition logic. Each `kafka-<range>` branch is a sibling
-that re-bases the same logic on a stock release (`stock 4.2.0` /
-`stock 3.9.2`) and patches the API drift documented in
-`docs/COMPATIBILITY.md`. Bug fixes flow from `main` outward to the
-release branches via cherry-pick.
+`main` tracks `apache/trunk` and is the source of truth for the KIP-1238 multi-partition
+logic. Each `kafka-<range>` branch is a sibling that re-bases the same logic on a stock
+release (`stock 4.2.0` / `stock 3.9.2`) and patches the API drift documented in
+`docs/COMPATIBILITY.md`. Bug fixes flow from `main` outward to the release branches via
+cherry-pick.
 
 ## Usage
 
@@ -70,7 +97,29 @@ driver.init();
 
 driver.createInputTopic("input", keySerde.serializer(), valueSerde.serializer(), 4)
       .pipeInput(new MultiPartitionTestRecord<>("k", "v", null, Instant.now(), 2));
+
+// The contract you cannot assert with stock TopologyTestDriver:
+assertEquals(4, driver.partitionsOf("my-store"));
+assertEquals(expectedValue, driver.getKeyValueStore("my-store", expectedPartition).get(key));
 ```
+
+## Tests in this repo that pin the contract
+
+The library's own test suite exercises each multi-partition behaviour on minimal
+topologies. Highlights:
+
+- `keyHashRoutingMatchesBuiltInPartitioner` — output partition matches production hash.
+- `coAlignedKeysAggregateAcrossSourcesAfterRepartition` — `Repartitioned` aligns merged
+  sources so the same key co-locates.
+- `mismatchedPartitionsAcrossSharedStoreSourcesSilentlySplitState` — pins the silent
+  state split so any future stricter validation is caught.
+- `globalKTableJoinFedFromGlobalTaskIsVisibleToEveryActiveTask` — global + multi-task
+  hand-off survives the partitioned runtime.
+- `advanceWallClockTimeFiresPunctuatorsAcrossAllTasks` — wall-clock punctuation fans out
+  to every task instance.
+
+For an end-to-end stateful demo (DSL + `.process` + repartition + multi-sub-topology),
+see [`kafka-streams-multipart-demo`](https://github.com/SouquieresAdam/kafka-streams-multipart-demo).
 
 ## Build
 
@@ -84,9 +133,9 @@ Requires JDK 25. The Gradle wrapper is committed at 9.4.1.
 
 ## Contributing
 
-Implementation notes, source baseline, branch model conventions and
-a pre-push test matrix live in [`CLAUDE.md`](CLAUDE.md). Per-version
-adapter detail lives in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+Implementation notes, source baseline, branch model conventions and a pre-push test
+matrix live in [`CLAUDE.md`](CLAUDE.md). Per-version adapter detail lives in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Status
 
