@@ -420,6 +420,7 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
         final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(
                 metrics,
                 "test-client",
+                "processId",
                 mockWallClockTime
         );
         TaskMetrics.droppedRecordsSensor(threadId, TASK_ID.toString(), streamsMetrics);
@@ -1309,6 +1310,14 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
             key == null ? ConsumerRecord.NULL_SIZE : key.length,
             value == null ? ConsumerRecord.NULL_SIZE : value.length,
             key, value, headers, Optional.empty())));
+        // KIP-1238 4.0.0/4.0.1 workaround: in production, StreamThread calls
+        // task.updateNextOffsets() with the result of consumer.poll().nextOffsets()
+        // after every poll. We bypass the consumer here, so we must replay that
+        // step manually. Without it, StreamTask.findOffsetAndMetadata throws
+        // "does not know the partition" on 4.0.1 (this was fixed-as-tolerant in
+        // 4.0.2 by returning Optional.empty(); we emulate the same pre-condition
+        // here so the multi-sub path commits cleanly across the whole 4.x range).
+        owner.updateNextOffsets(tp, new OffsetAndMetadata(offset + 1));
     }
 
     /**
