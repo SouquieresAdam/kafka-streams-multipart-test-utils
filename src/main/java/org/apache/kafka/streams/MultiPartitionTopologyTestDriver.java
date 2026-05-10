@@ -645,7 +645,7 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
                 // Process the record ...
                 task.process(mockWallClockTime.milliseconds());
                 task.maybePunctuateStreamTime();
-                commit(task.prepareCommit(true));
+                commit(task.prepareCommit());
                 task.postCommit(true);
                 captureOutputsAndReEnqueueInternalResults();
             }
@@ -765,7 +765,7 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
         if (initialized) {
             for (final StreamTask t : multiSubTasks.values()) {
                 t.maybePunctuateSystemTime();
-                commit(t.prepareCommit(true));
+                commit(t.prepareCommit());
                 t.postCommit(true);
             }
             completeAllProcessableWorkMultiSub();
@@ -773,7 +773,7 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
         }
         if (task != null) {
             task.maybePunctuateSystemTime();
-            commit(task.prepareCommit(true));
+            commit(task.prepareCommit());
             task.postCommit(true);
         }
         completeAllProcessableWork();
@@ -1326,7 +1326,7 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
             next.updateLags();
             next.process(mockWallClockTime.milliseconds());
             next.maybePunctuateStreamTime();
-            commit(next.prepareCommit(true));
+            commit(next.prepareCommit());
             next.postCommit(true);
             captureOutputsMultiSub();
         }
@@ -1965,14 +1965,14 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
     public void close() {
         if (task != null) {
             task.suspend();
-            task.prepareCommit(true);
+            task.prepareCommit();
             task.postCommit(true);
             task.closeClean();
         }
         for (final StreamTask t : multiSubTasks.values()) {
             try {
                 t.suspend();
-                t.prepareCommit(true);
+                t.prepareCommit();
                 t.postCommit(true);
                 t.closeClean();
             } catch (final RuntimeException e) {
