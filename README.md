@@ -75,11 +75,18 @@ driver.createInputTopic("input", keySerde.serializer(), valueSerde.serializer(),
 ## Build
 
 ```bash
-./gradlew test                        # default Kafka version
-./gradlew test -PkafkaVersion=4.1.0   # cross-build against another minor
+git checkout kafka-4.1-4.2             # pick the branch that matches your Kafka
+./gradlew test                         # default kafkaVersion from gradle.properties
+./gradlew test -PkafkaVersion=4.1.0    # cross-build inside the supported range
 ```
 
-Requires JDK 25.
+Requires JDK 25. The Gradle wrapper is committed at 9.4.1.
+
+## Contributing
+
+Implementation notes, source baseline, branch model conventions and
+a pre-push test matrix live in [`CLAUDE.md`](CLAUDE.md). Per-version
+adapter detail lives in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Status
 
