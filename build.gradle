@@ -73,11 +73,22 @@ tasks.withType(Javadoc).configureEach {
 
 // Apache 2.0 §4(d): the attribution must travel with the artifact, not just the
 // source repo. Ship LICENSE and NOTICE in META-INF/ of every produced jar (main,
-// sources, javadoc).
+// sources, javadoc). The Vanniktech plugin's `plainJavadocJar` is a Jar subclass
+// (`com.vanniktech.maven.publish.tasks.JavadocJar`) that tasks.withType(Jar)
+// does not match in practice, so configure it explicitly by name after the
+// plugin has finished registering tasks.
 tasks.withType(Jar).configureEach {
     from(rootProject.projectDir) {
         include 'LICENSE', 'NOTICE'
         into 'META-INF'
+    }
+}
+afterEvaluate {
+    tasks.named('plainJavadocJar').configure {
+        from(rootProject.projectDir) {
+            include 'LICENSE', 'NOTICE'
+            into 'META-INF'
+        }
     }
 }
 
