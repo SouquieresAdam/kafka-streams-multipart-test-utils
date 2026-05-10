@@ -54,15 +54,19 @@ It runs the same topology under stock `TopologyTestDriver` and
 Pick the row that matches the Kafka version your Streams app uses. The artifact is
 published on Maven Central under `consulting.stream:kafka-streams-multipart-test-utils`.
 
+The version of the artifact is `<kafkaCompatVersion>-<libVersion>`. The first
+segment names the Kafka API this jar was built against; the second is our own
+semver, bumped independently for hotfixes and feature work.
+
 | Your Kafka version | Depend on        | Source branch (info) |
 |---|---|---|
-| 3.7.x              | `3.7.2-kip1238`  | `kafka-3.7-3.9`  |
-| 3.8.x              | `3.8.1-kip1238`  | `kafka-3.7-3.9`  |
-| 3.9.x              | `3.9.2-kip1238`  | `kafka-3.7-3.9`  |
-| 4.0.0 / 4.0.1      | `4.0.1-kip1238`  | `kafka-4.0-early` |
-| 4.0.2              | `4.0.2-kip1238`  | `kafka-4.0`      |
-| 4.1.x              | `4.1.2-kip1238`  | `kafka-4.1-4.2`  |
-| 4.2.0              | `4.2.0-kip1238`  | `kafka-4.1-4.2`  |
+| 3.7.x              | `3.7.2-0.1.0`    | `kafka-3.7-3.9`  |
+| 3.8.x              | `3.8.1-0.1.0`    | `kafka-3.7-3.9`  |
+| 3.9.x              | `3.9.2-0.1.0`    | `kafka-3.7-3.9`  |
+| 4.0.0 / 4.0.1      | `4.0.1-0.1.0`    | `kafka-4.0-early` |
+| 4.0.2              | `4.0.2-0.1.0`    | `kafka-4.0`      |
+| 4.1.x              | `4.1.2-0.1.0`    | `kafka-4.1-4.2`  |
+| 4.2.0              | `4.2.0-0.1.0`    | `kafka-4.1-4.2`  |
 | 4.4.0-SNAPSHOT (apache trunk) | not published — build from `main` and `publishToMavenLocal` | `main` |
 
 Each artifact is the same library code compiled and tested against the exact Kafka
@@ -96,7 +100,7 @@ Kafka 3.9.2:
 <dependency>
   <groupId>consulting.stream</groupId>
   <artifactId>kafka-streams-multipart-test-utils</artifactId>
-  <version>3.9.2-kip1238</version>
+  <version>3.9.2-0.1.0</version>
   <scope>test</scope>
 </dependency>
 ```
