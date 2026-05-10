@@ -1,0 +1,87 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group = 'consulting.stream'
+version = "${kafkaVersion}-kip1238-SNAPSHOT"
+description = 'Multi-partition support for Kafka Streams TopologyTestDriver (KIP-1238 preview)'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withJavadocJar()
+    withSourcesJar()
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    // The Kafka Streams API and test-utils are required at compile and run time
+    // for users — but consumers always pull their own version. We mark them
+    // compileOnly so this artifact stays version-neutral within its supported
+    // range, and pin the test classpath to gradle.properties.
+    compileOnly "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    compileOnly "org.apache.kafka:kafka-streams-test-utils:${kafkaVersion}"
+    compileOnly "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    compileOnly "org.slf4j:slf4j-api:${slf4jVersion}"
+
+    testImplementation "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    testImplementation "org.apache.kafka:kafka-streams-test-utils:${kafkaVersion}"
+    testImplementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    testImplementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    testRuntimeOnly "org.slf4j:slf4j-simple:${slf4jVersion}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
+    testImplementation "org.hamcrest:hamcrest:${hamcrestVersion}"
+    testImplementation "org.mockito:mockito-core:${mockitoVersion}"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+        showStandardStreams = false
+    }
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'warn'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += [
+        '-Xlint:all',
+        '-Xlint:-serial',
+        '-Xlint:-options',
+        '-parameters',
+    ]
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.addStringOption('Xdoclint:none', '-quiet')
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            pom {
+                name = project.name
+                description = project.description
+                url = 'https://github.com/SouquieresAdam/kafka-streams-multipart-test-utils'
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+            }
+        }
+    }
+}

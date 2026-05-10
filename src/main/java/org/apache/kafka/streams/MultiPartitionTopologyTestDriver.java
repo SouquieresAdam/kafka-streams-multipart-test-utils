@@ -1,0 +1,2839 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.streams;
+
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.MockConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy;
+import org.apache.kafka.clients.producer.MockProducer;
+import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.Metric;
+import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.metrics.MetricConfig;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.streams.TopologyConfig.TaskConfig;
+import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
+import org.apache.kafka.streams.errors.ProcessingExceptionHandler;
+import org.apache.kafka.streams.errors.TopologyException;
+import org.apache.kafka.streams.internals.StreamsConfigUtils;
+import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.processor.PunctuationType;
+import org.apache.kafka.streams.processor.Punctuator;
+import org.apache.kafka.streams.processor.StateRestoreListener;
+import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.internals.ClientUtils;
+import org.apache.kafka.streams.processor.internals.GlobalProcessorContextImpl;
+import org.apache.kafka.streams.processor.internals.GlobalStateManager;
+import org.apache.kafka.streams.processor.internals.GlobalStateManagerImpl;
+import org.apache.kafka.streams.processor.internals.GlobalStateUpdateTask;
+import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilderHooks;
+import org.apache.kafka.streams.processor.internals.ProcessorContextImpl;
+import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
+import org.apache.kafka.streams.processor.internals.ProcessorStateManager;
+import org.apache.kafka.streams.processor.internals.ProcessorTopology;
+import org.apache.kafka.streams.processor.internals.RecordCollector;
+import org.apache.kafka.streams.processor.internals.RecordCollectorImpl;
+import org.apache.kafka.streams.processor.internals.StateDirectory;
+import org.apache.kafka.streams.processor.internals.StreamTask;
+import org.apache.kafka.streams.processor.internals.StreamsProducer;
+import org.apache.kafka.streams.processor.internals.Task;
+import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.Query;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
+import org.apache.kafka.streams.state.AggregationWithHeaders;
+import org.apache.kafka.streams.state.KeyValueIterator;
+import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
+import org.apache.kafka.streams.state.ReadOnlySessionStore;
+import org.apache.kafka.streams.state.ReadOnlyWindowStore;
+import org.apache.kafka.streams.state.SessionStore;
+import org.apache.kafka.streams.state.SessionStoreWithHeaders;
+import org.apache.kafka.streams.state.TimestampedKeyValueStore;
+import org.apache.kafka.streams.state.TimestampedKeyValueStoreWithHeaders;
+import org.apache.kafka.streams.state.TimestampedWindowStore;
+import org.apache.kafka.streams.state.TimestampedWindowStoreWithHeaders;
+import org.apache.kafka.streams.state.ValueAndTimestamp;
+import org.apache.kafka.streams.state.ValueTimestampHeaders;
+import org.apache.kafka.streams.state.VersionedKeyValueStore;
+import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.streams.state.WindowStoreIterator;
+import org.apache.kafka.streams.state.internals.GenericReadOnlyKeyValueStoreFacade;
+import org.apache.kafka.streams.state.internals.GenericReadOnlyWindowStoreFacade;
+import org.apache.kafka.streams.state.internals.SessionStoreIteratorFacade;
+import org.apache.kafka.streams.state.internals.ThreadCache;
+import org.apache.kafka.streams.state.internals.ValueConverters;
+import org.apache.kafka.streams.test.MultiPartitionTestRecord;
+import org.apache.kafka.streams.test.TestRecord;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+
+import static org.apache.kafka.streams.internals.StreamsConfigUtils.ProcessingMode.EXACTLY_ONCE_V2;
+import static org.apache.kafka.streams.state.ValueAndTimestamp.getValueOrNull;
+
+/**
+ * This class makes it easier to write tests to verify the behavior of topologies created with {@link Topology} or
+ * {@link StreamsBuilder}.
+ * You can test simple topologies that have a single processor, or very complex topologies that have multiple sources,
+ * processors, sinks, or sub-topologies.
+ * Best of all, the class works without a real Kafka broker, so the tests execute very quickly with very little overhead.
+ * <p>
+ * Using the {@code MultiPartitionTopologyTestDriver} in tests is easy: simply instantiate the driver and provide a {@link Topology}
+ * (cf. {@link StreamsBuilder#build()}) and {@link Properties config}, {@link #createInputTopic(String, Serializer, Serializer) create}
+ * and use a {@link TestInputTopic} to supply an input records to the topology,
+ * and then {@link #createOutputTopic(String, Deserializer, Deserializer) create} and use a {@link TestOutputTopic} to read and
+ * verify any output records by the topology.
+ * <p>
+ * Although the driver doesn't use a real Kafka broker, it does simulate Kafka {@link Consumer consumers} and
+ * {@link Producer producers} that read and write raw {@code byte[]} messages.
+ * You can let {@link TestInputTopic} and {@link TestOutputTopic} to handle conversion
+ * form regular Java objects to raw bytes.
+ *
+ * <h2>Driver setup</h2>
+ * In order to create a {@code MultiPartitionTopologyTestDriver} instance, you need a {@link Topology} and a {@link Properties config}.
+ * The configuration needs to be representative of what you'd supply to the real topology, so that means including
+ * several key properties (cf. {@link StreamsConfig}).
+ * For example, the following code fragment creates a configuration that specifies a timestamp extractor,
+ * default serializers and deserializers for string keys and values:
+ *
+ * <pre>{@code
+ * Properties props = new Properties();
+ * props.setProperty(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, CustomTimestampExtractor.class.getName());
+ * props.setProperty(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
+ * props.setProperty(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
+ * Topology topology = ...
+ * MultiPartitionTopologyTestDriver driver = new MultiPartitionTopologyTestDriver(topology, props);
+ * }</pre>
+ *
+ * <p> Note that the {@code MultiPartitionTopologyTestDriver} processes input records synchronously.
+ * This implies that {@link StreamsConfig#COMMIT_INTERVAL_MS_CONFIG commit.interval.ms} and
+ * {@link StreamsConfig#STATESTORE_CACHE_MAX_BYTES_CONFIG cache.max.bytes.buffering} configuration have no effect.
+ * The driver behaves as if both configs would be set to zero, i.e., as if a "commit" (and thus "flush") would happen
+ * after each input record.
+ *
+ * <h2>Processing messages</h2>
+ * <p>
+ * Your test can supply new input records on any of the topics that the topology's sources consume.
+ * This test driver simulates single-partitioned input topics.
+ * Here's an example of an input message on the topic named {@code input-topic}:
+ *
+ * <pre>{@code
+ * TestInputTopic<String, String> inputTopic = driver.createInputTopic("input-topic", stringSerdeSerializer, stringSerializer);
+ * inputTopic.pipeInput("key1", "value1");
+ * }</pre>
+ *
+ * When {@link TestInputTopic#pipeInput(Object, Object)} is called, the driver passes the input message through to the appropriate source that
+ * consumes the named topic, and will invoke the processor(s) downstream of the source.
+ * If your topology's processors forward messages to sinks, your test can then consume these output messages to verify
+ * they match the expected outcome.
+ * For example, if our topology should have generated 2 messages on {@code output-topic-1} and 1 message on
+ * {@code output-topic-2}, then our test can obtain these messages using the
+ * {@link TestOutputTopic#readKeyValue()}  method:
+ *
+ * <pre>{@code
+ * TestOutputTopic<String, String> outputTopic1 = driver.createOutputTopic("output-topic-1", stringDeserializer, stringDeserializer);
+ * TestOutputTopic<String, String> outputTopic2 = driver.createOutputTopic("output-topic-2", stringDeserializer, stringDeserializer);
+ *
+ * KeyValue<String, String> record1 = outputTopic1.readKeyValue();
+ * KeyValue<String, String> record2 = outputTopic2.readKeyValue();
+ * KeyValue<String, String> record3 = outputTopic1.readKeyValue();
+ * }</pre>
+ *
+ * Again, our example topology generates messages with string keys and values, so we supply our string deserializer
+ * instance for use on both the keys and values. Your test logic can then verify whether these output records are
+ * correct.
+ * <p>
+ * Note, that calling {@code pipeInput()} will also trigger {@link PunctuationType#STREAM_TIME event-time} base
+ * {@link ProcessorContext#schedule(Duration, PunctuationType, Punctuator) punctuation} callbacks.
+ * However, you won't trigger {@link PunctuationType#WALL_CLOCK_TIME wall-clock} type punctuations that you must
+ * trigger manually via {@link #advanceWallClockTime(Duration)}.
+ * <p>
+ * Finally, when completed, make sure your tests {@link #close()} the driver to release all resources and
+ * {@link org.apache.kafka.streams.processor.api.Processor processors}.
+ *
+ * <h2>Processor state</h2>
+ * <p>
+ * Some processors use Kafka {@link StateStore state storage}, so this driver class provides the generic
+ * {@link #getStateStore(String)} as well as store-type specific methods so that your tests can check the underlying
+ * state store(s) used by your topology's processors.
+ * In our previous example, after we supplied a single input message and checked the three output messages, our test
+ * could also check the key value store to verify the processor correctly added, removed, or updated internal state.
+ * Or, our test might have pre-populated some state <em>before</em> submitting the input message, and verified afterward
+ * that the processor(s) correctly updated the state.
+ *
+ * @see TestInputTopic
+ * @see TestOutputTopic
+ */
+public class MultiPartitionTopologyTestDriver implements Closeable {
+
+    private static final Logger log = LoggerFactory.getLogger(MultiPartitionTopologyTestDriver.class);
+
+    private final LogContext logContext;
+    private final Time mockWallClockTime;
+    private InternalTopologyBuilder internalTopologyBuilder;
+
+    private static final int PARTITION_ID = 0;
+    private static final TaskId TASK_ID = new TaskId(0, PARTITION_ID);
+    StreamTask task;
+    private GlobalStateUpdateTask globalStateTask;
+    private GlobalStateManager globalStateManager;
+
+    private StateDirectory stateDirectory;
+    private Metrics metrics;
+    ProcessorTopology processorTopology;
+    ProcessorTopology globalTopology;
+
+    private final MockConsumer<byte[], byte[]> consumer;
+    private final MockProducer<byte[], byte[]> producer;
+    private final StreamsProducer testDriverProducer;
+
+    private final Map<String, TopicPartition> partitionsByInputTopic = new HashMap<>();
+    private final Map<String, TopicPartition> globalPartitionsByInputTopic = new HashMap<>();
+    private final Map<TopicPartition, AtomicLong> offsetsByTopicOrPatternPartition = new HashMap<>();
+
+    private final Map<String, Queue<ProducerRecord<byte[], byte[]>>> outputRecordsByTopic = new HashMap<>();
+    private final StreamsConfigUtils.ProcessingMode processingMode;
+
+    // KIP-1238 multi-partition lifecycle (declareTopic/init). The fields below back the new API only;
+    // the legacy single-partition execution path does not consult them and continues to work unchanged.
+    private final Map<String, Integer> declaredPartitionsByTopic = new HashMap<>();
+    private boolean initialized = false;
+    private final List<Integer> subtopologyIds = new ArrayList<>();
+    private final Map<Integer, ProcessorTopology> subtopologyTopologies = new HashMap<>();
+    private final Map<Integer, Integer> partitionsBySubtopology = new HashMap<>();
+    private final Map<String, Integer> subtopologyByInputTopic = new HashMap<>();
+    private final Map<TopicPartition, TaskId> taskByTopicPartition = new HashMap<>();
+    private final Map<String, Map<Integer, Queue<ProducerRecord<byte[], byte[]>>>> outputByTopicPartition = new HashMap<>();
+    private final java.util.TreeMap<TaskId, StreamTask> multiSubTasks = new java.util.TreeMap<>();
+    private StreamsConfig multiSubStreamsConfig;
+    private TaskConfig multiSubTaskConfig;
+    private StreamsMetricsImpl multiSubStreamsMetrics;
+    private ThreadCache multiSubCache;
+
+    private final StateRestoreListener stateRestoreListener = new StateRestoreListener() {
+        @Override
+        public void onRestoreStart(final TopicPartition topicPartition, final String storeName, final long startingOffset, final long endingOffset) {}
+
+        @Override
+        public void onBatchRestored(final TopicPartition topicPartition, final String storeName, final long batchEndOffset, final long numRestored) {}
+
+        @Override
+        public void onRestoreEnd(final TopicPartition topicPartition, final String storeName, final long totalRestored) {}
+    };
+
+    /**
+     * Create a new test diver instance.
+     * Default test properties are used to initialize the driver instance
+     *
+     * @param topology the topology to be tested
+     */
+    public MultiPartitionTopologyTestDriver(final Topology topology) {
+        this(topology, new Properties());
+    }
+
+    /**
+     * Create a new test diver instance.
+     * Initialized the internally mocked wall-clock time with {@link System#currentTimeMillis() current system time}.
+     *
+     * @param topology the topology to be tested
+     * @param config   the configuration for the topology
+     */
+    public MultiPartitionTopologyTestDriver(final Topology topology,
+                              final Properties config) {
+        this(topology, config, null);
+    }
+
+    /**
+     * Create a new test diver instance.
+     *
+     * @param topology the topology to be tested
+     * @param initialWallClockTimeMs the initial value of internally mocked wall-clock time
+     */
+    public MultiPartitionTopologyTestDriver(final Topology topology,
+                              final Instant initialWallClockTimeMs) {
+        this(topology, new Properties(), initialWallClockTimeMs);
+    }
+
+    /**
+     * Create a new test diver instance.
+     *
+     * @param topology               the topology to be tested
+     * @param config                 the configuration for the topology
+     * @param initialWallClockTime   the initial value of internally mocked wall-clock time
+     */
+    public MultiPartitionTopologyTestDriver(final Topology topology,
+                              final Properties config,
+                              final Instant initialWallClockTime) {
+        this(
+            topology.internalTopologyBuilder,
+            config,
+            initialWallClockTime == null ? System.currentTimeMillis() : initialWallClockTime.toEpochMilli());
+    }
+
+    /**
+     * Create a new test diver instance.
+     *
+     * @param builder builder for the topology to be tested
+     * @param config the configuration for the topology
+     * @param initialWallClockTimeMs the initial value of internally mocked wall-clock time
+     */
+    private MultiPartitionTopologyTestDriver(final InternalTopologyBuilder builder,
+                               final Properties config,
+                               final long initialWallClockTimeMs) {
+        final Properties configCopy = new Properties();
+        configCopy.putAll(config);
+        configCopy.putIfAbsent(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy-bootstrap-host:0");
+        // provide randomized dummy app-id if it's not specified
+        configCopy.putIfAbsent(StreamsConfig.APPLICATION_ID_CONFIG, "dummy-topology-test-driver-app-id-" + ThreadLocalRandom.current().nextInt());
+        // disable stream-stream left/outer join emit result throttling
+        configCopy.putIfAbsent(StreamsConfig.InternalConfig.EMIT_INTERVAL_MS_KSTREAMS_OUTER_JOIN_SPURIOUS_RESULTS_FIX, 0L);
+        // disable windowed aggregation emit result throttling
+        configCopy.putIfAbsent(StreamsConfig.InternalConfig.EMIT_INTERVAL_MS_KSTREAMS_WINDOWED_AGGREGATION, 0L);
+        final StreamsConfig streamsConfig = new ClientUtils.QuietStreamsConfig(configCopy);
+        logIfTaskIdleEnabled(streamsConfig);
+
+        logContext = new LogContext("topology-test-driver ");
+        mockWallClockTime = new MockTime(initialWallClockTimeMs);
+        processingMode = StreamsConfigUtils.processingMode(streamsConfig);
+
+        final StreamsMetricsImpl streamsMetrics = setupMetrics(streamsConfig);
+        setupTopology(builder, streamsConfig);
+
+        final ThreadCache cache = new ThreadCache(
+            logContext,
+            Math.max(0, streamsConfig.getLong(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG)),
+            streamsMetrics
+        );
+
+        consumer = new MockConsumer<>(AutoOffsetResetStrategy.EARLIEST.name());
+        final Serializer<byte[]> bytesSerializer = new ByteArraySerializer();
+        producer = new MockProducer<>(Cluster.empty(), true, null, bytesSerializer, bytesSerializer) {
+            @Override
+            public List<PartitionInfo> partitionsFor(final String topic) {
+                // KIP-1238: when topics are declared with > 1 partition, the sink-side partitioner
+                // (DefaultStreamPartitioner) must see them all to compute the right output partition.
+                final int n = Math.max(1, declaredPartitionsByTopic.getOrDefault(topic, 1));
+                if (n == 1) {
+                    return Collections.singletonList(new PartitionInfo(topic, PARTITION_ID, null, null, null));
+                }
+                final List<PartitionInfo> infos = new ArrayList<>(n);
+                for (int p = 0; p < n; p++) {
+                    infos.add(new PartitionInfo(topic, p, null, null, null));
+                }
+                return infos;
+            }
+        };
+
+        testDriverProducer = new StreamsProducer(
+            producer,
+            StreamsConfigUtils.processingMode(streamsConfig),
+            mockWallClockTime,
+            logContext
+        );
+
+        setupGlobalTask(mockWallClockTime, streamsConfig, streamsMetrics, cache);
+        setupTask(streamsConfig, streamsMetrics, cache, internalTopologyBuilder.topologyConfigs().getTaskConfig());
+
+        // Capture references the multi-sub-topology runtime path (KIP-1238) needs at init() time.
+        this.multiSubStreamsConfig = streamsConfig;
+        this.multiSubTaskConfig = internalTopologyBuilder.topologyConfigs().getTaskConfig();
+        this.multiSubStreamsMetrics = streamsMetrics;
+        this.multiSubCache = cache;
+    }
+
+    private static void logIfTaskIdleEnabled(final StreamsConfig streamsConfig) {
+        final Long taskIdleTime = streamsConfig.getLong(StreamsConfig.MAX_TASK_IDLE_MS_CONFIG);
+        if (taskIdleTime > 0) {
+            log.info("Detected {} config in use with MultiPartitionTopologyTestDriver (set to {}ms)." +
+                         " This means you might need to use MultiPartitionTopologyTestDriver#advanceWallClockTime()" +
+                         " or enqueue records on all partitions to allow Steams to make progress." +
+                         " MultiPartitionTopologyTestDriver will log a message each time it cannot process enqueued" +
+                         " records due to {}.",
+                     StreamsConfig.MAX_TASK_IDLE_MS_CONFIG,
+                     taskIdleTime,
+                     StreamsConfig.MAX_TASK_IDLE_MS_CONFIG);
+        }
+    }
+
+    private StreamsMetricsImpl setupMetrics(final StreamsConfig streamsConfig) {
+        final String threadId = Thread.currentThread().getName();
+
+        final MetricConfig metricConfig = new MetricConfig()
+            .samples(streamsConfig.getInt(StreamsConfig.METRICS_NUM_SAMPLES_CONFIG))
+            .recordLevel(Sensor.RecordingLevel.forName(streamsConfig.getString(StreamsConfig.METRICS_RECORDING_LEVEL_CONFIG)))
+            .timeWindow(streamsConfig.getLong(StreamsConfig.METRICS_SAMPLE_WINDOW_MS_CONFIG), TimeUnit.MILLISECONDS);
+        metrics = new Metrics(metricConfig, mockWallClockTime);
+
+        final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(
+                metrics,
+                "test-client",
+                mockWallClockTime
+        );
+        TaskMetrics.droppedRecordsSensor(threadId, TASK_ID.toString(), streamsMetrics);
+
+        return streamsMetrics;
+    }
+
+    private void setupTopology(final InternalTopologyBuilder builder,
+                               final StreamsConfig streamsConfig) {
+        internalTopologyBuilder = builder;
+        internalTopologyBuilder.rewriteTopology(streamsConfig);
+
+        processorTopology = internalTopologyBuilder.buildTopology();
+        globalTopology = internalTopologyBuilder.buildGlobalStateTopology();
+
+        for (final String topic : processorTopology.sourceTopics()) {
+            final TopicPartition tp = new TopicPartition(topic, PARTITION_ID);
+            partitionsByInputTopic.put(topic, tp);
+            offsetsByTopicOrPatternPartition.put(tp, new AtomicLong());
+        }
+
+        stateDirectory = new StateDirectory(streamsConfig, mockWallClockTime, internalTopologyBuilder.hasPersistentStores(), false);
+    }
+
+    private void setupGlobalTask(final Time mockWallClockTime,
+                                 final StreamsConfig streamsConfig,
+                                 final StreamsMetricsImpl streamsMetrics,
+                                 final ThreadCache cache) {
+        if (globalTopology != null) {
+            final MockConsumer<byte[], byte[]> globalConsumer = new MockConsumer<>(AutoOffsetResetStrategy.NONE.name());
+            for (final String topicName : globalTopology.sourceTopics()) {
+                final TopicPartition partition = new TopicPartition(topicName, 0);
+                globalPartitionsByInputTopic.put(topicName, partition);
+                offsetsByTopicOrPatternPartition.put(partition, new AtomicLong());
+                globalConsumer.updatePartitions(topicName, Collections.singletonList(
+                    new PartitionInfo(topicName, 0, null, null, null)));
+                globalConsumer.updateBeginningOffsets(Collections.singletonMap(partition, 0L));
+                globalConsumer.updateEndOffsets(Collections.singletonMap(partition, 0L));
+            }
+
+            globalStateManager = new GlobalStateManagerImpl(
+                logContext,
+                mockWallClockTime,
+                globalTopology,
+                globalConsumer,
+                stateDirectory,
+                stateRestoreListener,
+                streamsConfig
+            );
+
+            final GlobalProcessorContextImpl globalProcessorContext =
+                new GlobalProcessorContextImpl(streamsConfig, globalStateManager, streamsMetrics, cache, mockWallClockTime);
+            globalStateManager.setGlobalProcessorContext(globalProcessorContext);
+
+            @SuppressWarnings("deprecation")
+            final boolean globalEnabled = streamsConfig.getBoolean(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_GLOBAL_ENABLED_CONFIG);
+            final ProcessingExceptionHandler processingExceptionHandler = 
+                globalEnabled ? streamsConfig.processingExceptionHandler() : null;
+
+            globalStateTask = new GlobalStateUpdateTask(
+                logContext,
+                globalTopology,
+                globalProcessorContext,
+                globalStateManager,
+                new LogAndContinueExceptionHandler(),
+                processingExceptionHandler,
+                mockWallClockTime,
+                streamsConfig.getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG)
+            );
+            globalStateTask.initialize();
+        } else {
+            globalStateManager = null;
+            globalStateTask = null;
+        }
+    }
+
+    private void setupTask(final StreamsConfig streamsConfig,
+                           final StreamsMetricsImpl streamsMetrics,
+                           final ThreadCache cache,
+                           final TaskConfig taskConfig) {
+        if (!partitionsByInputTopic.isEmpty()) {
+            consumer.assign(partitionsByInputTopic.values());
+            final Map<TopicPartition, Long> startOffsets = new HashMap<>();
+            for (final TopicPartition topicPartition : partitionsByInputTopic.values()) {
+                startOffsets.put(topicPartition, 0L);
+            }
+            consumer.updateBeginningOffsets(startOffsets);
+
+            final ProcessorStateManager stateManager = new ProcessorStateManager(
+                TASK_ID,
+                Task.TaskType.ACTIVE,
+                StreamsConfig.EXACTLY_ONCE_V2.equals(streamsConfig.getString(StreamsConfig.PROCESSING_GUARANTEE_CONFIG)),
+                logContext,
+                stateDirectory,
+                processorTopology.storeToChangelogTopic(),
+                new HashSet<>(partitionsByInputTopic.values()));
+            final RecordCollector recordCollector = new RecordCollectorImpl(
+                logContext,
+                TASK_ID,
+                testDriverProducer,
+                streamsConfig.productionExceptionHandler(),
+                streamsMetrics,
+                processorTopology
+            );
+
+            final InternalProcessorContext<?, ?> context = new ProcessorContextImpl(
+                TASK_ID,
+                streamsConfig,
+                stateManager,
+                streamsMetrics,
+                cache
+            );
+
+            task = new StreamTask(
+                TASK_ID,
+                new HashSet<>(partitionsByInputTopic.values()),
+                processorTopology,
+                consumer,
+                taskConfig,
+                streamsMetrics,
+                stateDirectory,
+                cache,
+                mockWallClockTime,
+                stateManager,
+                recordCollector,
+                context,
+                logContext,
+                false
+                );
+            task.initializeIfNeeded();
+            task.completeRestoration(noOpResetter -> { });
+            for (final TopicPartition tp: task.inputPartitions()) {
+                task.updateNextOffsets(tp, new OffsetAndMetadata(0, Optional.empty(), ""));
+            }
+        } else {
+            task = null;
+        }
+    }
+
+    /**
+     * Get read-only handle on global metrics registry.
+     *
+     * @return Map of all metrics.
+     */
+    public Map<MetricName, ? extends Metric> metrics() {
+        return Collections.unmodifiableMap(metrics.metrics());
+    }
+
+    private void pipeRecord(final String topicName,
+                            final long timestamp,
+                            final byte[] key,
+                            final byte[] value,
+                            final Headers headers) {
+        pipeRecord(topicName, timestamp, key, value, headers, null);
+    }
+
+    private void pipeRecord(final String topicName,
+                            final long timestamp,
+                            final byte[] key,
+                            final byte[] value,
+                            final Headers headers,
+                            final Integer explicitPartition) {
+        // Lazy auto-init: any user declareTopic() / createInputTopic(..., partitions) /
+        // createOutputTopic(..., partitions) call seeded declaredPartitionsByTopic; flip the driver
+        // over to the multi-sub-topology execution path on the first record.
+        if (!initialized && !declaredPartitionsByTopic.isEmpty()) {
+            init();
+        }
+        if (initialized) {
+            pipeRecordMultiSub(topicName, timestamp, key, value, headers, explicitPartition);
+            return;
+        }
+
+        final TopicPartition inputTopicOrPatternPartition = getInputTopicOrPatternPartition(topicName);
+        final TopicPartition globalInputTopicPartition = globalPartitionsByInputTopic.get(topicName);
+
+        if (inputTopicOrPatternPartition == null && globalInputTopicPartition == null) {
+            throw new IllegalArgumentException("Unknown topic: " + topicName);
+        }
+
+        if (inputTopicOrPatternPartition != null) {
+            enqueueTaskRecord(topicName, inputTopicOrPatternPartition, timestamp, key, value, headers);
+            completeAllProcessableWork();
+        }
+
+        if (globalInputTopicPartition != null) {
+            processGlobalRecord(globalInputTopicPartition, timestamp, key, value, headers);
+        }
+    }
+
+    private void enqueueTaskRecord(final String inputTopic,
+                                   final TopicPartition topicOrPatternPartition,
+                                   final long timestamp,
+                                   final byte[] key,
+                                   final byte[] value,
+                                   final Headers headers) {
+        final long offset = offsetsByTopicOrPatternPartition.get(topicOrPatternPartition).incrementAndGet() - 1;
+        task.addRecords(topicOrPatternPartition, Collections.singleton(new ConsumerRecord<>(
+            inputTopic,
+            topicOrPatternPartition.partition(),
+            offset,
+            timestamp,
+            TimestampType.CREATE_TIME,
+            key == null ? ConsumerRecord.NULL_SIZE : key.length,
+            value == null ? ConsumerRecord.NULL_SIZE : value.length,
+            key,
+            value,
+            headers,
+            Optional.empty()))
+        );
+    }
+
+    private void completeAllProcessableWork() {
+        // for internally triggered processing (like wall-clock punctuations),
+        // we might have buffered some records to internal topics that need to
+        // be piped back in to kick-start the processing loop. This is idempotent
+        // and therefore harmless in the case where all we've done is enqueued an
+        // input record from the user.
+        captureOutputsAndReEnqueueInternalResults();
+
+        // If the topology only has global tasks, then `task` would be null.
+        // For this method, it just means there's nothing to do.
+        if (task != null) {
+            task.resumePollingForPartitionsWithAvailableSpace();
+            task.updateLags();
+            while (task.hasRecordsQueued() && task.isProcessable(mockWallClockTime.milliseconds())) {
+                // Process the record ...
+                task.process(mockWallClockTime.milliseconds());
+                task.maybePunctuateStreamTime();
+                commit(task.prepareCommit(true));
+                task.postCommit(true);
+                captureOutputsAndReEnqueueInternalResults();
+            }
+            if (task.hasRecordsQueued()) {
+                log.info("Due to the {} configuration, there are currently some records" +
+                             " that cannot be processed. Advancing wall-clock time or" +
+                             " enqueuing records on the empty topics will allow" +
+                             " Streams to process more.",
+                         StreamsConfig.MAX_TASK_IDLE_MS_CONFIG);
+            }
+        }
+    }
+
+    @SuppressWarnings("removal")
+    private void commit(final Map<TopicPartition, OffsetAndMetadata> offsets) {
+        if (processingMode == EXACTLY_ONCE_V2) {
+            testDriverProducer.commitTransaction(offsets, new ConsumerGroupMetadata("dummy-app-id"));
+        } else {
+            consumer.commitSync(offsets);
+        }
+    }
+
+    private void processGlobalRecord(final TopicPartition globalInputTopicPartition,
+                                     final long timestamp,
+                                     final byte[] key,
+                                     final byte[] value,
+                                     final Headers headers) {
+        globalStateTask.update(new ConsumerRecord<>(
+            globalInputTopicPartition.topic(),
+            globalInputTopicPartition.partition(),
+            offsetsByTopicOrPatternPartition.get(globalInputTopicPartition).incrementAndGet() - 1,
+            timestamp,
+            TimestampType.CREATE_TIME,
+            key == null ? ConsumerRecord.NULL_SIZE : key.length,
+            value == null ? ConsumerRecord.NULL_SIZE : value.length,
+            key,
+            value,
+            headers,
+            Optional.empty())
+        );
+        globalStateTask.flushState();
+    }
+
+    private void validateSourceTopicNameRegexPattern(final String inputRecordTopic) {
+        for (final String sourceTopicName : internalTopologyBuilder.fullSourceTopicNames()) {
+            if (!sourceTopicName.equals(inputRecordTopic) && Pattern.compile(sourceTopicName).matcher(inputRecordTopic).matches()) {
+                throw new TopologyException("Topology add source of type String for topic: " + sourceTopicName +
+                                                " cannot contain regex pattern for input record topic: " + inputRecordTopic +
+                                                " and hence cannot process the message.");
+            }
+        }
+    }
+
+    private TopicPartition getInputTopicOrPatternPartition(final String topicName) {
+        if (!internalTopologyBuilder.fullSourceTopicNames().isEmpty()) {
+            validateSourceTopicNameRegexPattern(topicName);
+        }
+
+        final TopicPartition topicPartition = partitionsByInputTopic.get(topicName);
+        if (topicPartition == null) {
+            for (final Map.Entry<String, TopicPartition> entry : partitionsByInputTopic.entrySet()) {
+                if (Pattern.compile(entry.getKey()).matcher(topicName).matches()) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return topicPartition;
+    }
+
+    private void captureOutputsAndReEnqueueInternalResults() {
+        // Capture all the records sent to the producer ...
+        final List<ProducerRecord<byte[], byte[]>> output = producer.history();
+        producer.clear();
+
+        for (final ProducerRecord<byte[], byte[]> record : output) {
+            outputRecordsByTopic.computeIfAbsent(record.topic(), k -> new LinkedList<>()).add(record);
+
+            // Forward back into the topology if the produced record is to an internal or a source topic ...
+            final String outputTopicName = record.topic();
+
+            final TopicPartition inputTopicOrPatternPartition = getInputTopicOrPatternPartition(outputTopicName);
+            final TopicPartition globalInputTopicPartition = globalPartitionsByInputTopic.get(outputTopicName);
+
+            if (inputTopicOrPatternPartition != null) {
+                enqueueTaskRecord(
+                    outputTopicName,
+                    inputTopicOrPatternPartition,
+                    record.timestamp(),
+                    record.key(),
+                    record.value(),
+                    record.headers()
+                );
+            }
+
+            if (globalInputTopicPartition != null) {
+                processGlobalRecord(
+                    globalInputTopicPartition,
+                    record.timestamp(),
+                    record.key(),
+                    record.value(),
+                    record.headers()
+                );
+            }
+        }
+    }
+
+    /**
+     * Advances the internally mocked wall-clock time.
+     * This might trigger a {@link PunctuationType#WALL_CLOCK_TIME wall-clock} type
+     * {@link ProcessorContext#schedule(Duration, PunctuationType, Punctuator) punctuations}.
+     *
+     * @param advance the amount of time to advance wall-clock time
+     */
+    public void advanceWallClockTime(final Duration advance) {
+        Objects.requireNonNull(advance, "advance cannot be null");
+        mockWallClockTime.sleep(advance.toMillis());
+        if (initialized) {
+            for (final StreamTask t : multiSubTasks.values()) {
+                t.maybePunctuateSystemTime();
+                commit(t.prepareCommit(true));
+                t.postCommit(true);
+            }
+            completeAllProcessableWorkMultiSub();
+            return;
+        }
+        if (task != null) {
+            task.maybePunctuateSystemTime();
+            commit(task.prepareCommit(true));
+            task.postCommit(true);
+        }
+        completeAllProcessableWork();
+    }
+
+    private Queue<ProducerRecord<byte[], byte[]>> getRecordsQueue(final String topicName) {
+        final Queue<ProducerRecord<byte[], byte[]>> outputRecords = outputRecordsByTopic.get(topicName);
+        if (outputRecords == null && !processorTopology.sinkTopics().contains(topicName)) {
+            log.warn("Unrecognized topic: {}, this can occur if dynamic routing is used and no output has been "
+                         + "sent to this topic yet. If not using a TopicNameExtractor, check that the output topic "
+                         + "is correct.", topicName);
+        }
+        return outputRecords;
+    }
+
+    /**
+     * Create {@link TestInputTopic} to be used for piping records to topic
+     * Uses current system time as start timestamp for records.
+     * Auto-advance is disabled.
+     *
+     * @param topicName             the name of the topic
+     * @param keySerializer   the Serializer for the key type
+     * @param valueSerializer the Serializer for the value type
+     * @param <K> the key type
+     * @param <V> the value type
+     * @return {@link TestInputTopic} object
+     */
+    public final <K, V> MultiPartitionTestInputTopic<K, V> createInputTopic(final String topicName,
+                                                              final Serializer<K> keySerializer,
+                                                              final Serializer<V> valueSerializer) {
+        return new MultiPartitionTestInputTopic<>(
+            this,
+            topicName,
+            keySerializer,
+            valueSerializer,
+            Instant.ofEpochMilli(mockWallClockTime.milliseconds()),
+            Duration.ZERO
+        );
+    }
+
+    /**
+     * Create a {@link TestInputTopic} for a multi-partition topic (KIP-1238). The partition count is
+     * declared as if {@link #declareTopic(String, int)} had been called.
+     *
+     * @param topicName the name of the topic
+     * @param keySerializer the {@link Serializer} for the key type
+     * @param valueSerializer the {@link Serializer} for the value type
+     * @param partitions the number of partitions to simulate for this topic (must be at least 1)
+     * @param <K> the key type
+     * @param <V> the value type
+     * @return a {@link TestInputTopic} configured for this topic
+     */
+    public final <K, V> MultiPartitionTestInputTopic<K, V> createInputTopic(final String topicName,
+                                                              final Serializer<K> keySerializer,
+                                                              final Serializer<V> valueSerializer,
+                                                              final int partitions) {
+        declareTopic(topicName, partitions);
+        return createInputTopic(topicName, keySerializer, valueSerializer);
+    }
+
+    /**
+     * Create {@link TestInputTopic} to be used for piping records to topic
+     * Uses provided start timestamp and autoAdvance parameter for records
+     *
+     * @param topicName             the name of the topic
+     * @param keySerializer   the Serializer for the key type
+     * @param valueSerializer the Serializer for the value type
+     * @param startTimestamp Start timestamp for auto-generated record time
+     * @param autoAdvance autoAdvance duration for auto-generated record time
+     * @param <K> the key type
+     * @param <V> the value type
+     * @return {@link TestInputTopic} object
+     */
+    public final <K, V> MultiPartitionTestInputTopic<K, V> createInputTopic(final String topicName,
+                                                              final Serializer<K> keySerializer,
+                                                              final Serializer<V> valueSerializer,
+                                                              final Instant startTimestamp,
+                                                              final Duration autoAdvance) {
+        return new MultiPartitionTestInputTopic<>(this, topicName, keySerializer, valueSerializer, startTimestamp, autoAdvance);
+    }
+
+    /**
+     * Create {@link TestOutputTopic} to be used for reading records from topic
+     *
+     * @param topicName             the name of the topic
+     * @param keyDeserializer   the Deserializer for the key type
+     * @param valueDeserializer the Deserializer for the value type
+     * @param <K> the key type
+     * @param <V> the value type
+     * @return {@link TestOutputTopic} object
+     */
+    public final <K, V> MultiPartitionTestOutputTopic<K, V> createOutputTopic(final String topicName,
+                                                                final Deserializer<K> keyDeserializer,
+                                                                final Deserializer<V> valueDeserializer) {
+        return new MultiPartitionTestOutputTopic<>(this, topicName, keyDeserializer, valueDeserializer);
+    }
+
+    /**
+     * Create a {@link TestOutputTopic} for a multi-partition topic (KIP-1238). The partition count is
+     * declared as if {@link #declareTopic(String, int)} had been called.
+     *
+     * @param topicName the name of the topic
+     * @param keyDeserializer the {@link Deserializer} for the key type
+     * @param valueDeserializer the {@link Deserializer} for the value type
+     * @param partitions the number of partitions to simulate for this topic (must be at least 1)
+     * @param <K> the key type
+     * @param <V> the value type
+     * @return a {@link TestOutputTopic} configured for this topic
+     */
+    public final <K, V> MultiPartitionTestOutputTopic<K, V> createOutputTopic(final String topicName,
+                                                                final Deserializer<K> keyDeserializer,
+                                                                final Deserializer<V> valueDeserializer,
+                                                                final int partitions) {
+        declareTopic(topicName, partitions);
+        return createOutputTopic(topicName, keyDeserializer, valueDeserializer);
+    }
+
+    /**
+     * Declare the number of partitions for an input, output, or generated repartition topic (KIP-1238).
+     * Must be called before any record is piped. Subsequent calls with the same count are no-ops; calls
+     * with a different count throw {@link IllegalArgumentException}. Calls after the driver has been
+     * implicitly initialised (i.e. after the first pipe) throw {@link IllegalStateException}.
+     *
+     * @param topicName the topic to declare
+     * @param partitions the number of partitions (must be at least 1)
+     * @throws IllegalStateException if the driver has already been initialised
+     * @throws IllegalArgumentException if {@code partitions} is less than 1, or the topic was already
+     *         declared with a different count
+     */
+    public void declareTopic(final String topicName, final int partitions) {
+        Objects.requireNonNull(topicName, "topicName cannot be null");
+        if (initialized) {
+            throw new IllegalStateException(
+                "Cannot declare topic '" + topicName + "' after the driver has been initialised; "
+                    + "declare all multi-partition topics before piping records.");
+        }
+        if (partitions < 1) {
+            throw new IllegalArgumentException(
+                "Partition count must be at least 1 (topic='" + topicName + "', partitions=" + partitions + ").");
+        }
+        final Integer existing = declaredPartitionsByTopic.get(topicName);
+        if (existing != null && existing != partitions) {
+            throw new IllegalArgumentException(
+                "Topic '" + topicName + "' was already declared with " + existing
+                    + " partitions; cannot redeclare with " + partitions + ".");
+        }
+        declaredPartitionsByTopic.put(topicName, partitions);
+    }
+
+    /**
+     * Mark the driver as initialised (KIP-1238). Idempotent. Call this after declaring all multi-partition
+     * topics and before piping records. The single-partition back-compat path auto-initialises on first use,
+     * so existing tests do not need to call this method.
+     *
+     * <p>This builds the sub-topology task graph: for each sub-topology, it constructs its
+     * {@link ProcessorTopology}, resolves the partition count of any internal repartition topic
+     * (declared explicit count &gt; co-partition group inheritance &gt; max upstream sources &gt;
+     * fallback to 1), validates co-partitioning, and computes the per-sub-topology partition count
+     * as the max across its source topics. The runtime task instances themselves are still created
+     * lazily by the legacy execution path; KIP-1238 Pass 5 will switch the runtime over.</p>
+     */
+    public void init() {
+        if (initialized) {
+            return;
+        }
+
+        // 1. Enumerate sub-topology IDs and build each ProcessorTopology individually.
+        final Map<Integer, Set<String>> repartByPid = InternalTopologyBuilderHooks.subtopologyToRepartitionTopics(internalTopologyBuilder);
+        final Set<String> allInternalRepartitionTopics = new HashSet<>();
+        for (final Set<String> ts : repartByPid.values()) {
+            allInternalRepartitionTopics.addAll(ts);
+        }
+        // Layer 0 of the partition resolution: any repartition topic the topology builder has
+        // already pinned (e.g. via Repartitioned.withNumberOfPartitions(N)) takes precedence
+        // over our 3-layer rule. Seed declaredPartitionsByTopic so the upstream-max layer does
+        // not overwrite a user-explicit count.
+        for (final Map.Entry<String, Integer> entry :
+                InternalTopologyBuilderHooks.explicitRepartitionTopicPartitionCounts(internalTopologyBuilder).entrySet()) {
+            declaredPartitionsByTopic.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+        subtopologyIds.addAll(repartByPid.keySet());
+        Collections.sort(subtopologyIds);
+        for (final int sid : subtopologyIds) {
+            final ProcessorTopology pt = internalTopologyBuilder.buildSubtopology(sid);
+            subtopologyTopologies.put(sid, pt);
+            for (final String src : pt.sourceTopics()) {
+                subtopologyByInputTopic.put(src, sid);
+                // Only default user-declared topics to 1 partition. Internal repartition topics get
+                // their count from resolveInternalRepartitionTopicPartitions(); pre-defaulting them to
+                // 1 here would short-circuit that resolution (containsKey early-return).
+                if (!allInternalRepartitionTopics.contains(src)) {
+                    declaredPartitionsByTopic.putIfAbsent(src, 1);
+                }
+            }
+        }
+
+        // 2. Resolve internal repartition topic partition counts (3-layer rule + fallback).
+        resolveInternalRepartitionTopicPartitions();
+
+        // 3. Validate co-partitioning.
+        validateCopartitioning();
+
+        // 4. Compute partition count per sub-topology (max across source topics).
+        for (final int sid : subtopologyIds) {
+            final ProcessorTopology pt = subtopologyTopologies.get(sid);
+            int max = 1;
+            for (final String src : pt.sourceTopics()) {
+                max = Math.max(max, declaredPartitionsByTopic.getOrDefault(src, 1));
+            }
+            partitionsBySubtopology.put(sid, max);
+        }
+
+        // 5. Build one StreamTask per (sid, partition) using the shared MockConsumer/MockProducer.
+        setupMultiSubTasks();
+
+        initialized = true;
+    }
+
+    /**
+     * Build one {@link StreamTask} per {@code (subtopologyId, partition)} pair using the structures
+     * computed by {@link #init()}. All tasks share the driver's single {@link #consumer} and the
+     * {@link #testDriverProducer} as their record collector's producer.
+     */
+    private void setupMultiSubTasks() {
+        final MockConsumer<byte[], byte[]> sharedConsumer = consumer;
+        final List<TopicPartition> allSourcePartitions = new ArrayList<>();
+        final String threadId = Thread.currentThread().getName();
+
+        for (final int sid : subtopologyIds) {
+            final ProcessorTopology pt = subtopologyTopologies.get(sid);
+            if (pt.sourceTopics().isEmpty()) {
+                continue;
+            }
+            final int numPartitions = partitionsBySubtopology.getOrDefault(sid, 1);
+
+            // Register an offset counter for every (source-topic, partition) the sub-topology consumes.
+            for (final String src : pt.sourceTopics()) {
+                final int n = declaredPartitionsByTopic.getOrDefault(src, 1);
+                for (int p = 0; p < n; p++) {
+                    final TopicPartition tp = new TopicPartition(src, p);
+                    offsetsByTopicOrPatternPartition.putIfAbsent(tp, new AtomicLong());
+                    allSourcePartitions.add(tp);
+                }
+            }
+
+            for (int p = 0; p < numPartitions; p++) {
+                // Build a fresh ProcessorTopology per task: ProcessorNode state (sources, processors,
+                // store handles) is single-init and would otherwise throw "The processor is not closed"
+                // when the second task tries to initialize the same instance.
+                final ProcessorTopology freshPt = internalTopologyBuilder.buildSubtopology(sid);
+                buildOneMultiSubTask(sid, p, freshPt, sharedConsumer, threadId);
+            }
+        }
+
+        if (!allSourcePartitions.isEmpty()) {
+            sharedConsumer.assign(allSourcePartitions);
+            final Map<TopicPartition, Long> startOffsets = new HashMap<>();
+            for (final TopicPartition tp : allSourcePartitions) {
+                startOffsets.put(tp, 0L);
+            }
+            sharedConsumer.updateBeginningOffsets(startOffsets);
+            sharedConsumer.updateEndOffsets(startOffsets);
+        }
+    }
+
+    private void buildOneMultiSubTask(final int sid,
+                                      final int partition,
+                                      final ProcessorTopology pt,
+                                      final MockConsumer<byte[], byte[]> sharedConsumer,
+                                      final String threadId) {
+        final TaskId taskId = new TaskId(sid, partition);
+        TaskMetrics.droppedRecordsSensor(threadId, taskId.toString(), multiSubStreamsMetrics);
+
+        // This task owns partition {@code p} of each source topic that has at least p+1 partitions.
+        final Set<TopicPartition> inputPartitions = new HashSet<>();
+        for (final String src : pt.sourceTopics()) {
+            final int n = declaredPartitionsByTopic.getOrDefault(src, 1);
+            if (partition < n) {
+                final TopicPartition tp = new TopicPartition(src, partition);
+                inputPartitions.add(tp);
+                taskByTopicPartition.put(tp, taskId);
+            }
+        }
+        if (inputPartitions.isEmpty()) {
+            return;
+        }
+
+        final ProcessorStateManager stateManager = new ProcessorStateManager(
+            taskId,
+            Task.TaskType.ACTIVE,
+            StreamsConfig.EXACTLY_ONCE_V2.equals(multiSubStreamsConfig.getString(StreamsConfig.PROCESSING_GUARANTEE_CONFIG)),
+            logContext,
+            stateDirectory,
+            pt.storeToChangelogTopic(),
+            new HashSet<>(inputPartitions));
+        final RecordCollector recordCollector = new RecordCollectorImpl(
+            logContext,
+            taskId,
+            testDriverProducer,
+            multiSubStreamsConfig.productionExceptionHandler(),
+            multiSubStreamsMetrics,
+            pt
+        );
+        final InternalProcessorContext<?, ?> context = new ProcessorContextImpl(
+            taskId,
+            multiSubStreamsConfig,
+            stateManager,
+            multiSubStreamsMetrics,
+            multiSubCache
+        );
+        final StreamTask task = new StreamTask(
+            taskId,
+            new HashSet<>(inputPartitions),
+            pt,
+            sharedConsumer,
+            multiSubTaskConfig,
+            multiSubStreamsMetrics,
+            stateDirectory,
+            multiSubCache,
+            mockWallClockTime,
+            stateManager,
+            recordCollector,
+            context,
+            logContext,
+            false
+        );
+        task.initializeIfNeeded();
+        task.completeRestoration(noOpResetter -> { });
+        task.processorContext().setRecordContext(null);
+        multiSubTasks.put(taskId, task);
+    }
+
+    /**
+     * Resolve partition counts for internal repartition topics using the 3-layer rule:
+     * (1) explicit declaration via {@link #declareTopic(String, int)} wins; (2) co-partition group
+     * inheritance from a declared peer; (3) max partition count across the producing
+     * sub-topology's source topics; iterate to a fixed point because chains of internal topics can
+     * depend on each other. Topics still unresolved fall back to 1 partition with a warning.
+     */
+    private void resolveInternalRepartitionTopicPartitions() {
+        final Set<String> internalTopics = collectInternalRepartitionTopics();
+
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (final String topic : internalTopics) {
+                if (tryResolveOneInternalTopic(topic)) {
+                    changed = true;
+                }
+            }
+        }
+
+        // Fallback for anything still unresolved.
+        for (final String topic : internalTopics) {
+            if (!declaredPartitionsByTopic.containsKey(topic)) {
+                log.warn("Could not resolve partition count for internal repartition topic '{}'; defaulting to 1. "
+                    + "Declare it explicitly via declareTopic() if a different count is needed.", topic);
+                declaredPartitionsByTopic.put(topic, 1);
+            }
+        }
+    }
+
+    private Set<String> collectInternalRepartitionTopics() {
+        final Set<String> internalTopics = new HashSet<>();
+        final Map<Integer, Set<String>> byId = InternalTopologyBuilderHooks.subtopologyToRepartitionTopics(internalTopologyBuilder);
+        for (final int sid : subtopologyIds) {
+            internalTopics.addAll(byId.getOrDefault(sid, Collections.emptySet()));
+        }
+        return internalTopics;
+    }
+
+    /**
+     * Try to resolve a single internal repartition topic's partition count this round. Returns
+     * {@code true} if progress was made (the topic now has a count); {@code false} if it cannot be
+     * resolved yet (caller will iterate to a fixed point) or is already resolved.
+     */
+    private boolean tryResolveOneInternalTopic(final String topic) {
+        if (declaredPartitionsByTopic.containsKey(topic)) {
+            return false;
+        }
+        final Integer fromCopartition = resolveFromCopartitionGroup(topic);
+        if (fromCopartition != null) {
+            declaredPartitionsByTopic.put(topic, fromCopartition);
+            return true;
+        }
+        return tryResolveFromUpstreamSubtopology(topic);
+    }
+
+    private boolean tryResolveFromUpstreamSubtopology(final String topic) {
+        final Integer producerSid = InternalTopologyBuilderHooks.subtopologyForRepartitionTopicProducer(internalTopologyBuilder, topic);
+        if (producerSid == null) {
+            return false;
+        }
+        final ProcessorTopology pt = subtopologyTopologies.get(producerSid);
+        if (pt == null) {
+            return false;
+        }
+        Integer max = null;
+        for (final String src : pt.sourceTopics()) {
+            final Integer n = declaredPartitionsByTopic.get(src);
+            if (n == null) {
+                return false;
+            }
+            if (max == null || n > max) {
+                max = n;
+            }
+        }
+        if (max == null) {
+            return false;
+        }
+        declaredPartitionsByTopic.put(topic, max);
+        return true;
+    }
+
+    /**
+     * If {@code topic} participates in a co-partition group with any topic that already has a declared
+     * count, return that count. Returns {@code null} if the topic is unconstrained by co-partitioning.
+     */
+    private Integer resolveFromCopartitionGroup(final String topic) {
+        for (final Set<String> group : internalTopologyBuilder.copartitionGroups()) {
+            if (!group.contains(topic)) {
+                continue;
+            }
+            for (final String peer : group) {
+                if (peer.equals(topic)) {
+                    continue;
+                }
+                final Integer n = declaredPartitionsByTopic.get(peer);
+                if (n != null) {
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Validate that all topics in each co-partition group share the same declared partition count.
+     * Throws {@link TopologyException} naming the two witnessing topics on conflict.
+     */
+    private void validateCopartitioning() {
+        for (final Set<String> group : internalTopologyBuilder.copartitionGroups()) {
+            Integer expected = null;
+            String witness = null;
+            for (final String topic : group) {
+                final Integer n = declaredPartitionsByTopic.get(topic);
+                if (n == null) {
+                    continue;
+                }
+                if (expected == null) {
+                    expected = n;
+                    witness = topic;
+                } else if (!expected.equals(n)) {
+                    throw new TopologyException(
+                        "Co-partitioned topics have mismatching partition counts: '" + witness + "' has "
+                            + expected + " but '" + topic + "' has " + n
+                            + ". Declare matching counts via declareTopic() before piping records.");
+                }
+            }
+        }
+    }
+
+    /**
+     * Resolve the partition a record routes to (KIP-1238).
+     * Explicit partition wins; otherwise {@code Utils.toPositive(Utils.murmur2(keyBytes)) % n} matches
+     * {@code BuiltInPartitioner.partitionForKey}; null key or n == 1 routes to partition 0.
+     */
+    private int resolvePartition(final String topic, final byte[] keyBytes, final Integer explicit) {
+        final int n = Math.max(1, declaredPartitionsByTopic.getOrDefault(topic, 1));
+        if (explicit != null) {
+            if (explicit < 0 || explicit >= n) {
+                throw new IllegalArgumentException(
+                    "Partition " + explicit + " is out of range for topic '" + topic
+                        + "' (has " + n + " partitions). Declare a higher count via declareTopic() if needed.");
+            }
+            return explicit;
+        }
+        if (keyBytes == null || n == 1) {
+            return 0;
+        }
+        return Utils.toPositive(Utils.murmur2(keyBytes)) % n;
+    }
+
+    /**
+     * Multi-sub-topology pipe path (KIP-1238). Routes the record to the task owning the resolved
+     * (topic, partition) and drains every task to quiescence before returning.
+     */
+    private void pipeRecordMultiSub(final String topicName,
+                                    final long timestamp,
+                                    final byte[] key,
+                                    final byte[] value,
+                                    final Headers headers,
+                                    final Integer explicitPartition) {
+        final boolean isTaskInput = subtopologyByInputTopic.containsKey(topicName);
+        final boolean isGlobal = globalPartitionsByInputTopic.containsKey(topicName);
+        if (!isTaskInput && !isGlobal) {
+            throw new IllegalArgumentException("Unknown topic: " + topicName);
+        }
+        if (isTaskInput) {
+            final int partition = resolvePartition(topicName, key, explicitPartition);
+            enqueueTaskRecordMultiSub(topicName, new TopicPartition(topicName, partition),
+                timestamp, key, value, headers);
+            completeAllProcessableWorkMultiSub();
+        }
+        if (isGlobal) {
+            processGlobalRecord(globalPartitionsByInputTopic.get(topicName), timestamp, key, value, headers);
+        }
+    }
+
+    private void enqueueTaskRecordMultiSub(final String topic,
+                                           final TopicPartition tp,
+                                           final long timestamp,
+                                           final byte[] key,
+                                           final byte[] value,
+                                           final Headers headers) {
+        final TaskId taskId = taskByTopicPartition.get(tp);
+        if (taskId == null) {
+            throw new IllegalStateException(
+                "No task owns " + tp + ". This typically means init() was not called or the topic "
+                    + "was not declared with enough partitions.");
+        }
+        final StreamTask owner = multiSubTasks.get(taskId);
+        if (owner == null) {
+            throw new IllegalStateException("Task " + taskId + " is registered but no StreamTask exists for it.");
+        }
+        final long offset = offsetsByTopicOrPatternPartition
+            .computeIfAbsent(tp, k -> new AtomicLong())
+            .getAndIncrement();
+        owner.addRecords(tp, Collections.singleton(new ConsumerRecord<>(
+            topic, tp.partition(), offset, timestamp, TimestampType.CREATE_TIME,
+            key == null ? ConsumerRecord.NULL_SIZE : key.length,
+            value == null ? ConsumerRecord.NULL_SIZE : value.length,
+            key, value, headers, Optional.empty())));
+    }
+
+    /**
+     * Drain every multi-sub-topology task to quiescence, picking the processable task with the lowest
+     * current stream time on each iteration to mirror {@code PartitionGroup} ordering across tasks.
+     */
+    private void completeAllProcessableWorkMultiSub() {
+        captureOutputsMultiSub();
+        if (multiSubTasks.isEmpty()) {
+            return;
+        }
+        StreamTask next;
+        while ((next = pickNextProcessableTask()) != null) {
+            next.resumePollingForPartitionsWithAvailableSpace();
+            next.updateLags();
+            next.process(mockWallClockTime.milliseconds());
+            next.maybePunctuateStreamTime();
+            commit(next.prepareCommit(true));
+            next.postCommit(true);
+            captureOutputsMultiSub();
+        }
+        for (final StreamTask t : multiSubTasks.values()) {
+            if (t.hasRecordsQueued()) {
+                log.info("Multi-sub task {} has records that cannot be processed right now; advance "
+                    + "wall-clock time or pipe records on co-partitioned topics (see {}).",
+                    t.id(), StreamsConfig.MAX_TASK_IDLE_MS_CONFIG);
+            }
+        }
+    }
+
+    private StreamTask pickNextProcessableTask() {
+        StreamTask best = null;
+        long bestTime = Long.MAX_VALUE;
+        final long now = mockWallClockTime.milliseconds();
+        for (final StreamTask t : multiSubTasks.values()) {
+            if (!t.hasRecordsQueued() || !t.isProcessable(now)) {
+                continue;
+            }
+            final long streamTime = ((ProcessorContextImpl) t.processorContext()).currentStreamTimeMs();
+            if (streamTime < bestTime) {
+                bestTime = streamTime;
+                best = t;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Capture all records emitted by the shared producer this round, partition them in
+     * {@link #outputByTopicPartition} and {@link #outputRecordsByTopic} (the latter for back-compat
+     * with the existing read accessors), and loop back into any sub-topology that consumes the topic.
+     * Honours an explicit producer partition when set (custom {@link org.apache.kafka.streams.processor.StreamPartitioner}
+     * on a sink); otherwise resolves by key.
+     */
+    private void captureOutputsMultiSub() {
+        final List<ProducerRecord<byte[], byte[]>> output = producer.history();
+        producer.clear();
+        for (final ProducerRecord<byte[], byte[]> record : output) {
+            final String topic = record.topic();
+            final Integer producedPartition = record.partition();
+            // MockProducer leaves partition() null when the upstream code did not pin one. Resolve it
+            // ourselves so the output record reflects the partition the test driver actually routes to.
+            final int capturedPartition = producedPartition != null
+                ? producedPartition
+                : resolvePartition(topic, record.key(), null);
+            final ProducerRecord<byte[], byte[]> stamped = producedPartition != null
+                ? record
+                : new ProducerRecord<>(topic, capturedPartition, record.timestamp(),
+                    record.key(), record.value(), record.headers());
+
+            outputRecordsByTopic.computeIfAbsent(topic, k -> new LinkedList<>()).add(stamped);
+            outputByTopicPartition
+                .computeIfAbsent(topic, k -> new HashMap<>())
+                .computeIfAbsent(capturedPartition, k -> new LinkedList<>())
+                .add(stamped);
+
+            if (subtopologyByInputTopic.containsKey(topic)) {
+                enqueueTaskRecordMultiSub(topic, new TopicPartition(topic, capturedPartition),
+                    record.timestamp(), record.key(), record.value(), record.headers());
+            }
+            if (globalPartitionsByInputTopic.containsKey(topic)) {
+                processGlobalRecord(globalPartitionsByInputTopic.get(topic),
+                    record.timestamp(), record.key(), record.value(), record.headers());
+            }
+        }
+    }
+
+    /**
+     * Get all the names of all the topics to which records have been produced during the test run.
+     * <p>
+     * Call this method after piping the input into the test driver to retrieve the full set of topic names the topology
+     * produced records to.
+     * <p>
+     * The returned set of topic names may include user (e.g., output) and internal (e.g., changelog, repartition) topic
+     * names.
+     *
+     * @return the set of topic names the topology has produced to
+     */
+    public final Set<String> producedTopicNames() {
+        return Collections.unmodifiableSet(outputRecordsByTopic.keySet());
+    }
+
+    ProducerRecord<byte[], byte[]> readRecord(final String topic) {
+        final Queue<? extends ProducerRecord<byte[], byte[]>> outputRecords = getRecordsQueue(topic);
+        if (outputRecords == null) {
+            return null;
+        }
+        return outputRecords.poll();
+    }
+
+    <K, V> TestRecord<K, V> readRecord(final String topic,
+                                       final Deserializer<K> keyDeserializer,
+                                       final Deserializer<V> valueDeserializer) {
+        final Queue<? extends ProducerRecord<byte[], byte[]>> outputRecords = getRecordsQueue(topic);
+        if (outputRecords == null) {
+            throw new NoSuchElementException("Uninitialized topic: " + topic);
+        }
+        final ProducerRecord<byte[], byte[]> record = outputRecords.poll();
+        if (record == null) {
+            throw new NoSuchElementException("Empty topic: " + topic);
+        }
+        final K key = keyDeserializer.deserialize(record.topic(), record.headers(), record.key());
+        final V value = valueDeserializer.deserialize(record.topic(), record.headers(), record.value());
+        // KIP-1238: when the multi-sub-topology runtime is active, propagate the partition that
+        // the driver actually routed/stamped (see captureOutputsMultiSub). The legacy single-task
+        // path keeps partition=null on the returned TestRecord to preserve byte-identical
+        // behaviour for pre-KIP-1238 tests that compare full TestRecords by equals().
+        // KIP-1238: when the multi-sub-topology runtime is active, propagate the partition that
+        // the driver actually routed/stamped via a MultiPartitionTestRecord. The legacy single-task
+        // path returns a plain TestRecord to preserve byte-identical behaviour for pre-KIP-1238
+        // tests that compare full TestRecords by equals().
+        if (initialized) {
+            return new MultiPartitionTestRecord<>(key, value, record.headers(),
+                Instant.ofEpochMilli(record.timestamp()), record.partition());
+        }
+        return new TestRecord<>(key, value, record.headers(), record.timestamp());
+    }
+
+    <K, V> void pipeRecord(final String topic,
+                           final TestRecord<K, V> record,
+                           final Serializer<K> keySerializer,
+                           final Serializer<V> valueSerializer,
+                           final Instant time) {
+        final byte[] serializedKey = keySerializer.serialize(topic, record.headers(), record.key());
+        final byte[] serializedValue = valueSerializer.serialize(topic, record.headers(), record.value());
+        final long timestamp;
+        if (time != null) {
+            timestamp = time.toEpochMilli();
+        } else if (record.timestamp() != null) {
+            timestamp = record.timestamp();
+        } else {
+            throw new IllegalStateException("Provided `TestRecord` does not have a timestamp and no timestamp overwrite was provided via `time` parameter.");
+        }
+
+        pipeRecord(topic, timestamp, serializedKey, serializedValue, record.headers(),
+            MultiPartitionTestRecord.partitionOf(record));
+    }
+
+    final long queueSize(final String topic) {
+        final Queue<ProducerRecord<byte[], byte[]>> queue = getRecordsQueue(topic);
+        if (queue == null) {
+            //Return 0 if not initialized, getRecordsQueue throw exception if non existing topic
+            return 0;
+        }
+        return queue.size();
+    }
+
+    final boolean isEmpty(final String topic) {
+        return queueSize(topic) == 0;
+    }
+
+    /**
+     * Get all {@link StateStore StateStores} from the topology.
+     * The stores can be a "regular" or global stores.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord)}  process an input message}, and/or to check the store afterward.
+     * <p>
+     * Note, that {@code StateStore} might be {@code null} if a store is added but not connected to any processor.
+     * <p>
+     * <strong>Caution:</strong> Using this method to access stores that are added by the DSL is unsafe as the store
+     * types may change. Stores added by the DSL should only be accessed via the corresponding typed methods
+     * like {@link #getKeyValueStore(String)} etc.
+     *
+     * @return all stores my name
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    public Map<String, StateStore> getAllStateStores() {
+        final Map<String, StateStore> allStores = new HashMap<>();
+        for (final String storeName : internalTopologyBuilder.allStateStoreNames()) {
+            allStores.put(storeName, getStateStore(storeName, false));
+        }
+        return allStores;
+    }
+
+    /**
+     * Get the {@link StateStore} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * Should be used for custom stores only.
+     * For built-in stores, the corresponding typed methods like {@link #getKeyValueStore(String)} should be used.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the state store, or {@code null} if no store has been registered with the given name
+     * @throws IllegalArgumentException if the store is a built-in store like {@link KeyValueStore},
+     * {@link WindowStore}, or {@link SessionStore}
+     *
+     * @see #getAllStateStores()
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    public StateStore getStateStore(final String name) throws IllegalArgumentException {
+        return getStateStore(name, true);
+    }
+
+    private StateStore getStateStore(final String name,
+                                     final boolean throwForBuiltInStores) {
+        if (initialized) {
+            return getStateStoreMultiSub(name, throwForBuiltInStores);
+        }
+        if (task != null) {
+            task.processorContext().setRecordContext(new ProcessorRecordContext(0L, -1L, -1, null, new RecordHeaders()));
+            final StateStore stateStore = ((ProcessorContextImpl) task.processorContext()).stateManager().store(name);
+            if (stateStore != null) {
+                if (throwForBuiltInStores) {
+                    throwIfBuiltInStore(stateStore);
+                }
+                return stateStore;
+            }
+        }
+
+        if (globalStateManager != null) {
+            final StateStore stateStore = globalStateManager.store(name);
+            if (stateStore != null) {
+                if (throwForBuiltInStores) {
+                    throwIfBuiltInStore(stateStore);
+                }
+                return stateStore;
+            }
+
+        }
+
+        return null;
+    }
+
+    /**
+     * Multi-sub-topology lookup (KIP-1238). A global store match wins; otherwise we scan the tasks
+     * that own this store and return the only one. If the store is hosted by more than one task,
+     * throw {@link IllegalStateException} pointing at the partition-aware overloads.
+     */
+    private StateStore getStateStoreMultiSub(final String name, final boolean throwForBuiltInStores) {
+        if (globalStateManager != null) {
+            final StateStore gs = globalStateManager.store(name);
+            if (gs != null) {
+                if (throwForBuiltInStores) {
+                    throwIfBuiltInStore(gs);
+                }
+                return gs;
+            }
+        }
+        final List<StreamTask> owning = tasksOwningStore(name);
+        if (owning.isEmpty()) {
+            return null;
+        }
+        if (owning.size() > 1) {
+            throw new IllegalStateException(
+                "Store '" + name + "' is partitioned across " + owning.size() + " tasks; "
+                    + "use getStateStore(name, partition) or getStateStore(name, subtopologyId, partition) to disambiguate.");
+        }
+        final StreamTask only = owning.get(0);
+        only.processorContext().setRecordContext(
+            new ProcessorRecordContext(0L, -1L, -1, null, new RecordHeaders()));
+        final StateStore stateStore = ((ProcessorContextImpl) only.processorContext()).stateManager().store(name);
+        if (throwForBuiltInStores && stateStore != null) {
+            throwIfBuiltInStore(stateStore);
+        }
+        return stateStore;
+    }
+
+    private List<StreamTask> tasksOwningStore(final String name) {
+        final List<StreamTask> out = new ArrayList<>();
+        for (final StreamTask t : multiSubTasks.values()) {
+            final StateStore s = ((ProcessorContextImpl) t.processorContext()).stateManager().store(name);
+            if (s != null) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
+    private Integer subtopologyOwningStore(final String name) {
+        Integer found = null;
+        for (final StreamTask t : multiSubTasks.values()) {
+            final StateStore s = ((ProcessorContextImpl) t.processorContext()).stateManager().store(name);
+            if (s == null) {
+                continue;
+            }
+            final int sid = t.id().subtopology();
+            if (found != null && found != sid) {
+                throw new IllegalStateException(
+                    "Store '" + name + "' is registered in more than one sub-topology ("
+                        + found + " and " + sid + "). Use getStateStore(name, subtopologyId, partition) "
+                        + "to disambiguate.");
+            }
+            found = sid;
+        }
+        return found;
+    }
+
+    /**
+     * Return the {@link StateStore} for the task owning {@code partition} of the sub-topology that
+     * registers a store named {@code name} (KIP-1238). If the store name appears in multiple
+     * sub-topologies, throws {@link IllegalStateException}; use the 3-arg overload to disambiguate.
+     *
+     * @param name the store name
+     * @param partition the partition whose owning task should be queried
+     * @return the {@link StateStore}, or {@code null} if no sub-topology registers a store with this name
+     */
+    public StateStore getStateStore(final String name, final int partition) {
+        if (!initialized) {
+            init();
+        }
+        if (globalStateManager != null) {
+            final StateStore gs = globalStateManager.store(name);
+            if (gs != null) {
+                return gs;
+            }
+        }
+        final Integer sid = subtopologyOwningStore(name);
+        if (sid == null) {
+            return null;
+        }
+        return getStateStore(name, sid, partition);
+    }
+
+    /**
+     * Fully-qualified {@link StateStore} accessor (KIP-1238). Use when a store name appears in more
+     * than one sub-topology.
+     *
+     * @param name the store name
+     * @param subtopologyId the sub-topology id
+     * @param partition the partition whose owning task should be queried
+     * @return the {@link StateStore}, or {@code null} if the task does not register a store with this name
+     * @throws IllegalArgumentException if no task exists for {@code (subtopologyId, partition)}
+     */
+    public StateStore getStateStore(final String name, final int subtopologyId, final int partition) {
+        if (!initialized) {
+            init();
+        }
+        final TaskId taskId = new TaskId(subtopologyId, partition);
+        final StreamTask owner = multiSubTasks.get(taskId);
+        if (owner == null) {
+            throw new IllegalArgumentException(
+                "No task exists for " + taskId + " (sub-topology " + subtopologyId + " has "
+                    + partitionsBySubtopology.getOrDefault(subtopologyId, 0) + " partition(s)).");
+        }
+        owner.processorContext().setRecordContext(
+            new ProcessorRecordContext(0L, -1L, -1, null, new RecordHeaders()));
+        return ((ProcessorContextImpl) owner.processorContext()).stateManager().store(name);
+    }
+
+    /**
+     * @return the number of partitions of the sub-topology that registers {@code storeName}, or 0
+     *         if no sub-topology registers it (or 1 for a global store) (KIP-1238).
+     */
+    public int partitionsOf(final String storeName) {
+        if (!initialized) {
+            init();
+        }
+        if (globalStateManager != null && globalStateManager.store(storeName) != null) {
+            return 1;
+        }
+        final Integer sid = subtopologyOwningStore(storeName);
+        return sid == null ? 0 : partitionsBySubtopology.getOrDefault(sid, 0);
+    }
+
+    /**
+     * @return the number of partitions of the given sub-topology, or 0 if the id is unknown (KIP-1238).
+     */
+    public int partitionsOfSubtopology(final int subtopologyId) {
+        if (!initialized) {
+            init();
+        }
+        return partitionsBySubtopology.getOrDefault(subtopologyId, 0);
+    }
+
+    /**
+     * @return an unmodifiable list of the sub-topology ids in this driver (KIP-1238).
+     */
+    public List<Integer> subtopologies() {
+        if (!initialized) {
+            init();
+        }
+        return Collections.unmodifiableList(subtopologyIds);
+    }
+
+    private void throwIfBuiltInStore(final StateStore stateStore) {
+        if (stateStore instanceof VersionedKeyValueStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a versioned key-value store and should be accessed via `getVersionedKeyValueStore()`");
+        }
+        if (stateStore instanceof TimestampedKeyValueStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a timestamped key-value store and should be accessed via `getTimestampedKeyValueStore()`");
+        }
+        if (stateStore instanceof ReadOnlyKeyValueStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a key-value store and should be accessed via `getKeyValueStore()`");
+        }
+        if (stateStore instanceof TimestampedWindowStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a timestamped window store and should be accessed via `getTimestampedWindowStore()`");
+        }
+        if (stateStore instanceof ReadOnlyWindowStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a window store and should be accessed via `getWindowStore()`");
+        }
+        if (stateStore instanceof ReadOnlySessionStore) {
+            throw new IllegalArgumentException("Store " + stateStore.name()
+                                                   + " is a session store and should be accessed via `getSessionStore()`");
+        }
+    }
+
+    /**
+     * Get the {@link KeyValueStore}, {@link TimestampedKeyValueStore}, or {@link TimestampedKeyValueStoreWithHeaders}
+     * with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * If the registered store is a {@link TimestampedKeyValueStore} or {@link TimestampedKeyValueStoreWithHeaders}
+     * this method will return a value-only query interface.
+     * <strong>It is highly recommended to update the code for this case to avoid bugs and to use
+     * {@link #getTimestampedKeyValueStore(String)} or {@link #getTimestampedKeyValueStoreWithHeaders(String)}
+     * for full store access instead.</strong>
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the key value store, or {@code null} if no {@link KeyValueStore}, {@link TimestampedKeyValueStore}, or
+     * {@link TimestampedWindowStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> KeyValueStore<K, V> getKeyValueStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        if (store instanceof TimestampedKeyValueStoreWithHeaders) {
+            log.warn("Method #getTimestampedKeyValueStore() should be used to access a TimestampedKeyValueStoreWithHeaders.");
+            return new KeyValueStoreFacadeForHeaders<>((TimestampedKeyValueStoreWithHeaders<K, V>) store);
+        }
+        if (store instanceof TimestampedKeyValueStore) {
+            log.warn("Method #getTimestampedKeyValueStore() should be used to access a TimestampedKeyValueStore.");
+            return new KeyValueStoreFacade<>((TimestampedKeyValueStore<K, V>) store);
+        }
+        return store instanceof KeyValueStore ? (KeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link TimestampedKeyValueStore} or {@link TimestampedKeyValueStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * If the registered store is a {@link TimestampedKeyValueStoreWithHeaders} this method will return a value-ts-only query interface.
+     * <strong>It is highly recommended to update the code for this case to avoid bugs and to use
+     * {@link #getTimestampedKeyValueStoreWithHeaders(String)} for full store access instead.</strong>
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the key value store, or {@code null} if no {@link TimestampedKeyValueStore} or
+     * {@link TimestampedKeyValueStoreWithHeaders }has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> KeyValueStore<K, ValueAndTimestamp<V>> getTimestampedKeyValueStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        if (store instanceof TimestampedKeyValueStoreWithHeaders) {
+            return new TimestampedKeyValueStoreFacadeForHeaders<>((TimestampedKeyValueStoreWithHeaders<K, V>) store);
+        }
+        return store instanceof TimestampedKeyValueStore ? (TimestampedKeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link TimestampedKeyValueStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the key value store, or {@code null} if no {@link TimestampedKeyValueStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> KeyValueStore<K, ValueTimestampHeaders<V>> getTimestampedKeyValueStoreWithHeaders(final String name) {
+        final StateStore store = getStateStore(name, false);
+        return store instanceof TimestampedKeyValueStoreWithHeaders ? (TimestampedKeyValueStoreWithHeaders<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link VersionedKeyValueStore} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the versioned store, or {@code null} if no {@link VersionedKeyValueStore} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> VersionedKeyValueStore<K, V> getVersionedKeyValueStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        return store instanceof VersionedKeyValueStore ? (VersionedKeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link WindowStore}, {@link TimestampedWindowStore}, or {@link TimestampedWindowStoreWithHeaders}
+     * with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * If the registered store is a {@link TimestampedWindowStore} or {@link TimestampedWindowStoreWithHeaders}
+     * this method will return a value-only query interface.
+     * <strong>It is highly recommended to update the code for this case to avoid bugs and to use
+     * {@link #getTimestampedWindowStore(String)} or {@link #getTimestampedWindowStoreWithHeaders(String)}
+     * for full store access instead.</strong>
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the window store, or {@code null} if no {@link WindowStore}, {@link TimestampedWindowStore}, or
+     * {@link TimestampedWindowStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> WindowStore<K, V> getWindowStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        if (store instanceof TimestampedWindowStoreWithHeaders) {
+            log.warn("Method #getTimestampedWindowStoreWithHeaders() should be used to access a TimestampedWindowStoreWithHeaders.");
+            return new WindowStoreFacadeForHeaders<>((TimestampedWindowStoreWithHeaders<K, V>) store);
+        }
+        if (store instanceof TimestampedWindowStore) {
+            log.warn("Method #getTimestampedWindowStore() should be used to access a TimestampedWindowStore.");
+            return new WindowStoreFacade<>((TimestampedWindowStore<K, V>) store);
+        }
+        return store instanceof WindowStore ? (WindowStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link TimestampedWindowStore} or {@link TimestampedWindowStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * If the registered store is a {@link TimestampedWindowStoreWithHeaders}
+     * this method will return a value-ts--only query interface.
+     * <strong>It is highly recommended to update the code for this case to avoid bugs and to use
+     * {@link #getTimestampedWindowStoreWithHeaders(String)} for full store access instead.</strong>
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the window store, or {@code null} if no {@link TimestampedWindowStore} or
+     * {@link TimestampedWindowStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> WindowStore<K, ValueAndTimestamp<V>> getTimestampedWindowStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        if (store instanceof TimestampedWindowStoreWithHeaders) {
+            return new TimestampedWindowStoreFacadeForHeaders<>((TimestampedWindowStoreWithHeaders<K, V>) store);
+        }
+        return store instanceof TimestampedWindowStore ? (TimestampedWindowStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link TimestampedWindowStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the window store, or {@code null} if no {@link TimestampedWindowStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getSessionStore(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> WindowStore<K, ValueTimestampHeaders<V>> getTimestampedWindowStoreWithHeaders(final String name) {
+        final StateStore store = getStateStore(name, false);
+        return store instanceof TimestampedWindowStoreWithHeaders ? (TimestampedWindowStoreWithHeaders<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link SessionStore} or {@link SessionStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * If the registered store is a {@link SessionStoreWithHeaders}
+     * this method will return a value--only query interface.
+     * <strong>It is highly recommended to update the code for this case to avoid bugs and to use
+     * {@link #getSessionStoreWithHeaders(String)} for full store access instead.</strong>
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the session store, or {@code null} if no {@link SessionStore} or {@link SessionStoreWithHeaders}
+     * has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStoreWithHeaders(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> SessionStore<K, V> getSessionStore(final String name) {
+        final StateStore store = getStateStore(name, false);
+        if (store instanceof SessionStoreWithHeaders) {
+            return new SessionStoreFacade<>((SessionStoreWithHeaders<K, V>) store);
+        }
+        return store instanceof SessionStore ? (SessionStore<K, V>) store : null;
+    }
+
+    /**
+     * Get the {@link SessionStoreWithHeaders} with the given name.
+     * The store can be a "regular" or global store.
+     * <p>
+     * This is often useful in test cases to pre-populate the store before the test case instructs the topology to
+     * {@link TestInputTopic#pipeInput(TestRecord) process an input message}, and/or to check the store afterward.
+     *
+     * @param name the name of the store
+     * @return the session store, or {@code null} if no {@link SessionStoreWithHeaders} has been registered with the given name
+     * @see #getAllStateStores()
+     * @see #getStateStore(String)
+     * @see #getKeyValueStore(String)
+     * @see #getTimestampedKeyValueStore(String)
+     * @see #getTimestampedKeyValueStoreWithHeaders(String)
+     * @see #getVersionedKeyValueStore(String)
+     * @see #getWindowStore(String)
+     * @see #getTimestampedWindowStore(String)
+     * @see #getTimestampedWindowStoreWithHeaders(String)
+     * @see #getSessionStore(String)
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> SessionStoreWithHeaders<K, V> getSessionStoreWithHeaders(final String name) {
+        final StateStore store = getStateStore(name, false);
+        return store instanceof SessionStoreWithHeaders ? (SessionStoreWithHeaders<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link KeyValueStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> KeyValueStore<K, V> getKeyValueStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        if (store instanceof TimestampedKeyValueStore) {
+            log.info("Method #getTimestampedKeyValueStore() should be used to access a TimestampedKeyValueStore.");
+            return new KeyValueStoreFacade<>((TimestampedKeyValueStore<K, V>) store);
+        }
+        return store instanceof KeyValueStore ? (KeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link TimestampedKeyValueStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> KeyValueStore<K, ValueAndTimestamp<V>> getTimestampedKeyValueStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        return store instanceof TimestampedKeyValueStore ? (TimestampedKeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link VersionedKeyValueStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> VersionedKeyValueStore<K, V> getVersionedKeyValueStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        return store instanceof VersionedKeyValueStore ? (VersionedKeyValueStore<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link WindowStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> WindowStore<K, V> getWindowStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        if (store instanceof TimestampedWindowStore) {
+            log.info("Method #getTimestampedWindowStore() should be used to access a TimestampedWindowStore.");
+            return new WindowStoreFacade<>((TimestampedWindowStore<K, V>) store);
+        }
+        return store instanceof WindowStore ? (WindowStore<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link TimestampedWindowStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> WindowStore<K, ValueAndTimestamp<V>> getTimestampedWindowStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        return store instanceof TimestampedWindowStore ? (TimestampedWindowStore<K, V>) store : null;
+    }
+
+    /**
+     * Partition-aware {@link SessionStore} accessor (KIP-1238).
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> SessionStore<K, V> getSessionStore(final String name, final int partition) {
+        final StateStore store = getStateStore(name, partition);
+        return store instanceof SessionStore ? (SessionStore<K, V>) store : null;
+    }
+
+    /**
+     * Close the driver, its topology, and all processors.
+     */
+    public void close() {
+        if (task != null) {
+            task.suspend();
+            task.prepareCommit(true);
+            task.postCommit(true);
+            task.closeClean();
+        }
+        for (final StreamTask t : multiSubTasks.values()) {
+            try {
+                t.suspend();
+                t.prepareCommit(true);
+                t.postCommit(true);
+                t.closeClean();
+            } catch (final RuntimeException e) {
+                log.warn("Error closing multi-sub task {}: {}", t.id(), e.toString());
+            }
+        }
+        if (globalStateTask != null) {
+            try {
+                globalStateTask.close(false);
+            } catch (final IOException e) {
+                // ignore
+            }
+        }
+        if (initialized) {
+            completeAllProcessableWorkMultiSub();
+        } else {
+            completeAllProcessableWork();
+        }
+        if (task != null && task.hasRecordsQueued()) {
+            log.warn("Found some records that cannot be processed due to the" +
+                         " {} configuration during MultiPartitionTopologyTestDriver#close().",
+                     StreamsConfig.MAX_TASK_IDLE_MS_CONFIG);
+        }
+        producer.close();
+        consumer.close();
+        stateDirectory.clean();
+    }
+
+    static class MockTime implements Time {
+        private final AtomicLong timeMs;
+        private final AtomicLong highResTimeNs;
+
+        MockTime(final long startTimestampMs) {
+            this.timeMs = new AtomicLong(startTimestampMs);
+            this.highResTimeNs = new AtomicLong(startTimestampMs * 1000L * 1000L);
+        }
+
+        @Override
+        public long milliseconds() {
+            return timeMs.get();
+        }
+
+        @Override
+        public long nanoseconds() {
+            return highResTimeNs.get();
+        }
+
+        @Override
+        public long hiResClockMs() {
+            return TimeUnit.NANOSECONDS.toMillis(nanoseconds());
+        }
+
+        @Override
+        public void sleep(final long ms) {
+            if (ms < 0) {
+                throw new IllegalArgumentException("Sleep ms cannot be negative.");
+            }
+            timeMs.addAndGet(ms);
+            highResTimeNs.addAndGet(TimeUnit.MILLISECONDS.toNanos(ms));
+        }
+
+        @Override
+        public void waitObject(final Object obj, final Supplier<Boolean> condition, final long timeoutMs) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    static class KeyValueStoreFacade<K, V> extends GenericReadOnlyKeyValueStoreFacade<K, ValueAndTimestamp<V>, V> implements KeyValueStore<K, V> {
+        private final TimestampedKeyValueStore<K, V> inner;
+
+        public KeyValueStoreFacade(final TimestampedKeyValueStore<K, V> store) {
+            super(store, ValueConverters.extractValue());
+            this.inner = store;
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public void put(final K key, final V value) {
+            inner.put(key, ValueAndTimestamp.make(value, ConsumerRecord.NO_TIMESTAMP));
+        }
+
+        @Override
+        public V putIfAbsent(final K key, final V value) {
+            return getValueOrNull(inner.putIfAbsent(key, ValueAndTimestamp.make(value, ConsumerRecord.NO_TIMESTAMP)));
+        }
+
+        @Override
+        public void putAll(final List<KeyValue<K, V>> entries) {
+            for (final KeyValue<K, V> entry : entries) {
+                inner.put(entry.key, ValueAndTimestamp.make(entry.value, ConsumerRecord.NO_TIMESTAMP));
+            }
+        }
+
+        @Override
+        public V delete(final K key) {
+            return getValueOrNull(inner.delete(key));
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+    static class WindowStoreFacade<K, V> extends GenericReadOnlyWindowStoreFacade<K, ValueAndTimestamp<V>, V> implements WindowStore<K, V> {
+        private final TimestampedWindowStore<K, V> inner;
+
+        public WindowStoreFacade(final TimestampedWindowStore<K, V> store) {
+            super(store, ValueConverters.extractValue());
+            this.inner = store;
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public WindowStoreIterator<V> fetch(final K key,
+                                            final long timeFrom,
+                                            final long timeTo) {
+            return fetch(key, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetchAll(final long timeFrom,
+                                                         final long timeTo) {
+            return fetchAll(Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetch(final K keyFrom,
+                                                      final K keyTo,
+                                                      final long timeFrom,
+                                                      final long timeTo) {
+            return fetch(keyFrom, keyTo, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public WindowStoreIterator<V> backwardFetch(final K key,
+                                                     final long timeFrom,
+                                                     final long timeTo) {
+            return backwardFetch(key, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetchAll(final long timeFrom,
+                                                                 final long timeTo) {
+            return backwardFetchAll(Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetch(final K keyFrom,
+                                                              final K keyTo,
+                                                              final long timeFrom,
+                                                              final long timeTo) {
+            return backwardFetch(keyFrom, keyTo, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public void put(final K key,
+                        final V value,
+                        final long windowStartTimestamp) {
+            inner.put(key, ValueAndTimestamp.make(value, ConsumerRecord.NO_TIMESTAMP), windowStartTimestamp);
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+    static class WindowStoreFacadeForHeaders<K, V> extends GenericReadOnlyWindowStoreFacade<K, ValueTimestampHeaders<V>, V> implements WindowStore<K, V> {
+        private final TimestampedWindowStoreWithHeaders<K, V> inner;
+
+        public WindowStoreFacadeForHeaders(final TimestampedWindowStoreWithHeaders<K, V> store) {
+            super(store, ValueConverters.extractValueFromHeaders());
+            this.inner = store;
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public WindowStoreIterator<V> fetch(final K key,
+                                            final long timeFrom,
+                                            final long timeTo) {
+            return fetch(key, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetchAll(final long timeFrom,
+                                                         final long timeTo) {
+            return fetchAll(Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetch(final K keyFrom,
+                                                      final K keyTo,
+                                                      final long timeFrom,
+                                                      final long timeTo) {
+            return fetch(keyFrom, keyTo, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public WindowStoreIterator<V> backwardFetch(final K key,
+                                                    final long timeFrom,
+                                                    final long timeTo) {
+            return backwardFetch(key, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetchAll(final long timeFrom,
+                                                                 final long timeTo) {
+            return backwardFetchAll(Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetch(final K keyFrom,
+                                                              final K keyTo,
+                                                              final long timeFrom,
+                                                              final long timeTo) {
+            return backwardFetch(keyFrom, keyTo, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public void put(final K key,
+                        final V value,
+                        final long windowStartTimestamp) {
+            inner.put(key, ValueTimestampHeaders.make(value, ConsumerRecord.NO_TIMESTAMP, new RecordHeaders()), windowStartTimestamp);
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+    static class TimestampedWindowStoreFacadeForHeaders<K, V> extends GenericReadOnlyWindowStoreFacade<K, ValueTimestampHeaders<V>, ValueAndTimestamp<V>> implements WindowStore<K, ValueAndTimestamp<V>> {
+        private final TimestampedWindowStoreWithHeaders<K, V> inner;
+
+        public TimestampedWindowStoreFacadeForHeaders(final TimestampedWindowStoreWithHeaders<K, V> store) {
+            super(store, ValueConverters.extractValueAndTimestampFromHeaders());
+            this.inner = store;
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+
+        @Override
+        public void put(final K key, final ValueAndTimestamp<V> value, final long windowStartTimestamp) {
+            inner.put(key, ValueTimestampHeaders.make(value.value(), value.timestamp(), null), windowStartTimestamp);
+        }
+
+        @Override
+        public WindowStoreIterator<ValueAndTimestamp<V>> fetch(final K key, final long timeFrom, final long timeTo) {
+            return fetch(key, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, ValueAndTimestamp<V>> fetch(final K keyFrom, final K keyTo, final long timeFrom, final long timeTo) {
+            return fetch(keyFrom, keyTo, Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, ValueAndTimestamp<V>> fetchAll(final long timeFrom, final long timeTo) {
+            return fetchAll(Instant.ofEpochMilli(timeFrom), Instant.ofEpochMilli(timeTo));
+        }
+    }
+
+
+    static class SessionStoreFacade<K, V> implements SessionStore<K, V> {
+        private final SessionStoreWithHeaders<K, V> inner;
+
+        SessionStoreFacade(final SessionStoreWithHeaders<K, V> inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> findSessions(final K key,
+                                                             final long earliestSessionEndTime,
+                                                             final long latestSessionStartTime) {
+            return new SessionStoreIteratorFacade<>(inner.findSessions(key, earliestSessionEndTime, latestSessionStartTime));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFindSessions(final K key,
+                                                                     final long earliestSessionEndTime,
+                                                                     final long latestSessionStartTime) {
+            return new SessionStoreIteratorFacade<>(inner.backwardFindSessions(key, earliestSessionEndTime, latestSessionStartTime));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> findSessions(final K keyFrom,
+                                                             final K keyTo,
+                                                             final long earliestSessionEndTime,
+                                                             final long latestSessionStartTime) {
+            return new SessionStoreIteratorFacade<>(inner.findSessions(keyFrom, keyTo, earliestSessionEndTime, latestSessionStartTime));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFindSessions(final K keyFrom,
+                                                                     final K keyTo,
+                                                                     final long earliestSessionEndTime,
+                                                                     final long latestSessionStartTime) {
+            return new SessionStoreIteratorFacade<>(inner.backwardFindSessions(keyFrom, keyTo, earliestSessionEndTime, latestSessionStartTime));
+        }
+
+        @Override
+        public V fetchSession(final K key,
+                              final long sessionStartTime,
+                              final long sessionEndTime) {
+            return AggregationWithHeaders.getAggregationOrNull(inner.fetchSession(key, sessionStartTime, sessionEndTime));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> findSessions(final long earliestSessionEndTime,
+                                                             final long latestSessionEndTime) {
+            return new SessionStoreIteratorFacade<>(inner.findSessions(earliestSessionEndTime, latestSessionEndTime));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetch(final K key) {
+            return new SessionStoreIteratorFacade<>(inner.fetch(key));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetch(final K key) {
+            return new SessionStoreIteratorFacade<>(inner.backwardFetch(key));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> fetch(final K keyFrom, final K keyTo) {
+            return new SessionStoreIteratorFacade<>(inner.fetch(keyFrom, keyTo));
+        }
+
+        @Override
+        public KeyValueIterator<Windowed<K>, V> backwardFetch(final K keyFrom, final K keyTo) {
+            return new SessionStoreIteratorFacade<>(inner.backwardFetch(keyFrom, keyTo));
+        }
+
+        @Override
+        public void remove(final Windowed<K> sessionKey) {
+            inner.remove(sessionKey);
+        }
+
+        @Override
+        public void put(final Windowed<K> sessionKey, final V aggregate) {
+            inner.put(sessionKey, AggregationWithHeaders.make(aggregate, new RecordHeaders()));
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+    static class KeyValueStoreFacadeForHeaders<K, V> extends GenericReadOnlyKeyValueStoreFacade<K, ValueTimestampHeaders<V>, V> implements KeyValueStore<K, V> {
+        private final TimestampedKeyValueStoreWithHeaders<K, V> inner;
+
+        public KeyValueStoreFacadeForHeaders(final TimestampedKeyValueStoreWithHeaders<K, V> store) {
+            super(store, ValueConverters.extractValueFromHeaders());
+            this.inner = store;
+        }
+
+        @Override
+        public V get(final K key) {
+            return ValueTimestampHeaders.getValueOrNull(inner.get(key));
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public void put(final K key, final V value) {
+            inner.put(key, ValueTimestampHeaders.make(value, ConsumerRecord.NO_TIMESTAMP, null));
+        }
+
+        @Override
+        public V putIfAbsent(final K key, final V value) {
+            return ValueTimestampHeaders.getValueOrNull(inner.putIfAbsent(key, ValueTimestampHeaders.make(value, ConsumerRecord.NO_TIMESTAMP, null)));
+        }
+
+        @Override
+        public void putAll(final List<KeyValue<K, V>> entries) {
+            for (final KeyValue<K, V> entry : entries) {
+                inner.put(entry.key, ValueTimestampHeaders.make(entry.value, ConsumerRecord.NO_TIMESTAMP, null));
+            }
+        }
+
+        @Override
+        public V delete(final K key) {
+            return ValueTimestampHeaders.getValueOrNull(inner.delete(key));
+        }
+
+        @Override
+        public long approximateNumEntries() {
+            return inner.approximateNumEntries();
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+    static class TimestampedKeyValueStoreFacadeForHeaders<K, V> extends GenericReadOnlyKeyValueStoreFacade<K, ValueTimestampHeaders<V>, ValueAndTimestamp<V>> implements KeyValueStore<K, ValueAndTimestamp<V>> {
+        private final TimestampedKeyValueStoreWithHeaders<K, V> inner;
+
+        public TimestampedKeyValueStoreFacadeForHeaders(final TimestampedKeyValueStoreWithHeaders<K, V> store) {
+            super(store, ValueConverters.extractValueAndTimestampFromHeaders());
+            this.inner = store;
+        }
+
+        @Override
+        public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+            inner.init(stateStoreContext, root);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void flush() {
+            inner.flush();
+        }
+
+        @Override
+        public void put(final K key, final ValueAndTimestamp<V> value) {
+            inner.put(key, ValueTimestampHeaders.make(value.value(), value.timestamp(), null));
+        }
+
+        @Override
+        public ValueAndTimestamp<V> get(final K key) {
+            final ValueTimestampHeaders<V> vth = inner.get(key);
+            return vth == null ? null : ValueAndTimestamp.make(vth.value(), vth.timestamp());
+        }
+
+        @Override
+        public ValueAndTimestamp<V> putIfAbsent(final K key, final ValueAndTimestamp<V> value) {
+            final ValueTimestampHeaders<V> result = inner.putIfAbsent(key, ValueTimestampHeaders.make(value.value(), value.timestamp(), null));
+            return result == null ? null : ValueAndTimestamp.make(result.value(), result.timestamp());
+        }
+
+        @Override
+        public void putAll(final List<KeyValue<K, ValueAndTimestamp<V>>> entries) {
+            for (final KeyValue<K, ValueAndTimestamp<V>> entry : entries) {
+                inner.put(entry.key, ValueTimestampHeaders.make(entry.value.value(), entry.value.timestamp(), null));
+            }
+        }
+
+        @Override
+        public ValueAndTimestamp<V> delete(final K key) {
+            final ValueTimestampHeaders<V> result = inner.delete(key);
+            return result == null ? null : ValueAndTimestamp.make(result.value(), result.timestamp());
+        }
+
+        @Override
+        public void close() {
+            inner.close();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public boolean persistent() {
+            return inner.persistent();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return inner.isOpen();
+        }
+
+        @Override
+        public <R> QueryResult<R> query(
+            final Query<R> query,
+            final PositionBound positionBound,
+            final QueryConfig config
+        ) {
+            return inner.query(query, positionBound, config);
+        }
+
+        @Override
+        public Position getPosition() {
+            return inner.getPosition();
+        }
+    }
+
+}
