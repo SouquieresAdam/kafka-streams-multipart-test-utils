@@ -5,7 +5,12 @@
 
 group = 'consulting.stream'
 def isRelease = project.hasProperty('release')
-version = isRelease ? "${kafkaVersion}-kip1238" : "${kafkaVersion}-kip1238-SNAPSHOT"
+// Version scheme: <kafkaCompatVersion>-<libSemver>. The Kafka prefix is the
+// compatibility axis (which Kafka API surface this jar was built against);
+// libVersion is our own semver, free to bump for hotfixes/features without
+// touching the Kafka prefix. KIP-1238 is documented in description/README.
+def libVersion = '0.1.0'
+version = isRelease ? "${kafkaVersion}-${libVersion}" : "${kafkaVersion}-${libVersion}-SNAPSHOT"
 description = 'Multi-partition support for Kafka Streams TopologyTestDriver (KIP-1238 preview)'
 
 java {
