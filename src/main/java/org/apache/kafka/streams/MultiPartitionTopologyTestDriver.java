@@ -1309,6 +1309,12 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
             key == null ? ConsumerRecord.NULL_SIZE : key.length,
             value == null ? ConsumerRecord.NULL_SIZE : value.length,
             key, value, headers, Optional.empty())));
+        // KIP-1238: in production, StreamThread calls task.updateNextOffsets() with the result of
+        // consumer.poll().nextOffsets() after every poll. We bypass the consumer here, so we replay
+        // that step manually. Pre-4.0.2 StreamTask.findOffsetAndMetadata throws on partitions whose
+        // next offset is unset; 4.0.2+ tolerates that case, but seeding the offset is the correct
+        // mirror of production behaviour and is harmless on every release.
+        owner.updateNextOffsets(tp, new OffsetAndMetadata(offset + 1));
     }
 
     /**
