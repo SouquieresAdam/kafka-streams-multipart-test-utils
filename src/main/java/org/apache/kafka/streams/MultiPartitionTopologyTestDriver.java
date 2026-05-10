@@ -1325,6 +1325,9 @@ public class MultiPartitionTopologyTestDriver implements Closeable {
             key == null ? ConsumerRecord.NULL_SIZE : key.length,
             value == null ? ConsumerRecord.NULL_SIZE : value.length,
             key, value, headers, Optional.empty())));
+        // 3.x note: no updateNextOffsets() API yet. StreamTask tracks
+        // consumedOffsets directly inside process(), so seeding here is both
+        // unnecessary and not implementable. The 4.x branches replay this step.
     }
 
     /**
