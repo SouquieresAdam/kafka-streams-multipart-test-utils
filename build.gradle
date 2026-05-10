@@ -1,18 +1,17 @@
 plugins {
     id 'java-library'
-    id 'maven-publish'
+    id 'com.vanniktech.maven.publish' version '0.30.0'
 }
 
 group = 'consulting.stream'
-version = "${kafkaVersion}-kip1238-SNAPSHOT"
+def isRelease = project.hasProperty('release')
+version = isRelease ? "${kafkaVersion}-kip1238" : "${kafkaVersion}-kip1238-SNAPSHOT"
 description = 'Multi-partition support for Kafka Streams TopologyTestDriver (KIP-1238 preview)'
 
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(25)
     }
-    withJavadocJar()
-    withSourcesJar()
 }
 
 repositories {
@@ -67,21 +66,47 @@ tasks.withType(Javadoc).configureEach {
     options.addStringOption('Xdoclint:none', '-quiet')
 }
 
-publishing {
-    publications {
-        maven(MavenPublication) {
-            from components.java
-            pom {
-                name = project.name
-                description = project.description
-                url = 'https://github.com/SouquieresAdam/kafka-streams-multipart-test-utils'
-                licenses {
-                    license {
-                        name = 'The Apache License, Version 2.0'
-                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
-                    }
-                }
+// Maven Central publishing via the Central Portal (https://central.sonatype.com).
+// Releases use `-Prelease` to drop the -SNAPSHOT suffix; local development publishes
+// to mavenLocal without that flag and stays on SNAPSHOT.
+//
+// Required at publish time (env var or gradle.properties):
+//   - mavenCentralUsername / mavenCentralPassword (Central Portal user token)
+//   - signingInMemoryKey / signingInMemoryKeyId / signingInMemoryKeyPassword (GPG)
+//
+// publishToMavenCentral() uploads to a deferred staging area; release happens manually
+// in the Central Portal UI after inspection. Pass true to auto-release.
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+
+    pom {
+        name = 'kafka-streams-multipart-test-utils'
+        description = project.description
+        inceptionYear = '2026'
+        url = 'https://github.com/SouquieresAdam/kafka-streams-multipart-test-utils'
+
+        licenses {
+            license {
+                name = 'The Apache License, Version 2.0'
+                url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                distribution = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
             }
+        }
+
+        developers {
+            developer {
+                id = 'SouquieresAdam'
+                name = 'Souquieres Adam'
+                email = 'souquieres.adam@proton.me'
+                url = 'https://github.com/SouquieresAdam'
+            }
+        }
+
+        scm {
+            url = 'https://github.com/SouquieresAdam/kafka-streams-multipart-test-utils'
+            connection = 'scm:git:git://github.com/SouquieresAdam/kafka-streams-multipart-test-utils.git'
+            developerConnection = 'scm:git:ssh://git@github.com/SouquieresAdam/kafka-streams-multipart-test-utils.git'
         }
     }
 }
