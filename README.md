@@ -71,7 +71,9 @@ care about the first two columns.
 
 The package layout uses **split packages** (`org.apache.kafka.streams.*`) to access
 package-private internals. Kafka has no `module-info.java`, so this works on the
-classpath without `--add-opens`.
+classpath without `--add-opens`. Place this jar on the **classpath only** — on the
+JPMS module path it would conflict with `kafka-streams` (two automatic modules
+cannot export the same package).
 
 Versions outside the table are **not supported**:
 - 3.0.x – 3.6.x — Confluent Platform support window has lapsed; the backport surface
@@ -157,4 +159,9 @@ once KIP-1238 lands upstream this artifact will be archived.
 
 ## License
 
-Apache License, Version 2.0. See [LICENSE](LICENSE).
+Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+This project is **not affiliated with, endorsed by, or sponsored by the Apache
+Software Foundation**. "Apache", "Apache Kafka", and "Kafka" are trademarks of
+the Apache Software Foundation; they are used here descriptively to indicate
+compatibility.
