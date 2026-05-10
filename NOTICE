@@ -1,0 +1,14 @@
+kafka-streams-multipart-test-utils
+Copyright 2026 Adam Souquieres
+
+This product includes software derived from Apache Kafka
+(https://kafka.apache.org/), Copyright 2014-2026 The Apache Software
+Foundation, licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+The package layout (org.apache.kafka.streams.*) is used to access
+package-private internals required by the multi-partition test driver.
+
+This product is not affiliated with, endorsed by, or sponsored by
+the Apache Software Foundation. "Apache", "Apache Kafka", and "Kafka"
+are trademarks of the Apache Software Foundation.
