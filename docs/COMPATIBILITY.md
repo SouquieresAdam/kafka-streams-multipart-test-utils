@@ -30,6 +30,7 @@ on Kafka itself is required.
 | `main` | 4.4.0-SNAPSHOT (trunk) | local only | source baseline; needs trunk in `mavenLocal()` |
 | `kafka-4.1-4.2` | 4.1.0 – 4.2.0 | 4.1.2, 4.2.0 | rebase on stock 4.2.0; restore 9-arg `ProcessorStateManager` (with `ChangelogRegister` + `stateUpdaterEnabled`); import `InternalTopologyBuilder.TopicsInfo` as nested |
 | `kafka-4.0` | 4.0.2 only | 4.0.2 | `StreamTask.prepareCommit()` no-arg (vs `prepareCommit(boolean)` from 4.1) |
+| `kafka-4.0-early` | 4.0.0 – 4.0.1 | 4.0.0, 4.0.1 | 4-arg `StreamsMetricsImpl` ctor (`Metrics`, `clientId`, `processId`, `Time`) — collapsed to 3 args in 4.0.2; explicit `task.updateNextOffsets()` after `addRecords()` to side-step the pre-4.0.2 strict `findOffsetAndMetadata` |
 | `kafka-3.7-3.9` | 3.7.x – 3.9.x | 3.7.2, 3.8.1, 3.9.2 | rebase on stock 3.9.2; `StreamsConfig.defaultProductionExceptionHandler()` rename; `ProcessorStateManager.getStore()` / `GlobalStateManager.getStore()` rename (4.x dropped the `get` prefix); explicit imports for `RecordHeaders` and `ProcessorRecordContext`; `MultiPartitionTestOutputTopic` uses `driver.getQueueSize(topic)` instead of `driver.queueSize(topic)` |
 
 Each `kafka-<range>` branch's `gradle.properties` pins the default
@@ -37,24 +38,6 @@ Each `kafka-<range>` branch's `gradle.properties` pins the default
 manually with `-PkafkaVersion=<x.y.z>` before tagging.
 
 ## Versions deliberately not covered
-
-### 4.0.0 / 4.0.1
-
-Two divergences from 4.0.2:
-
-1. `StreamsMetricsImpl(Metrics, String, String, Time)` — 4-arg form
-   that collapsed to 3-arg in 4.0.2. Pure compile fix.
-2. `StreamTask.committableOffsetsAndMetadata` calls
-   `findOffsetAndMetadata` for every input partition; on 4.0.0/4.0.1 the
-   global-table partitions are not yet pre-registered when the multi-sub
-   runtime calls `prepareCommit`, so it throws
-   *"Stream task X_Y does not know the partition: …"*. 9 of 16 tests
-   fail at runtime, including all GlobalKTable scenarios. This is a
-   behavioural divergence, not just an API rename, and would require a
-   separate registration step in the multi-sub setup path.
-
-A user pinned to 4.0.0/4.0.1 should upgrade to 4.0.2 (drop-in,
-patch-level Kafka release).
 
 ### 3.0.x – 3.6.x
 
