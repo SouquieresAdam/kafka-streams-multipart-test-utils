@@ -1,6 +1,6 @@
 plugins {
     id 'java-library'
-    id 'com.vanniktech.maven.publish' version '0.30.0'
+    id 'com.vanniktech.maven.publish' version '0.34.0'
 }
 
 group = 'consulting.stream'
@@ -80,7 +80,8 @@ mavenPublishing {
     // SonatypeHost.CENTRAL_PORTAL targets the new Central Portal Publisher API
     // (https://central.sonatype.com). The no-arg overload still hits the legacy OSSRH
     // staging API which Sonatype shut down for new namespaces in 2024.
-    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+    // In Vanniktech 0.32+, the no-arg form defaults to the Central Portal Publisher API.
+    publishToMavenCentral()
     signAllPublications()
 
     pom {
