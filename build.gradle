@@ -1,4 +1,4 @@
-plugins {
+    plugins {
     id 'java-library'
     id 'com.vanniktech.maven.publish' version '0.34.0'
 }
@@ -64,6 +64,16 @@ tasks.withType(JavaCompile).configureEach {
 tasks.withType(Javadoc).configureEach {
     options.encoding = 'UTF-8'
     options.addStringOption('Xdoclint:none', '-quiet')
+}
+
+// Apache 2.0 §4(d): the attribution must travel with the artifact, not just the
+// source repo. Ship LICENSE and NOTICE in META-INF/ of every produced jar (main,
+// sources, javadoc).
+tasks.withType(Jar).configureEach {
+    from(rootProject.projectDir) {
+        include 'LICENSE', 'NOTICE'
+        into 'META-INF'
+    }
 }
 
 // Maven Central publishing via the Central Portal (https://central.sonatype.com).
