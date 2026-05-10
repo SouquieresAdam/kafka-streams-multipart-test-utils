@@ -1,95 +1,97 @@
 # Compatibility backport notes
 
-This document tracks the API surface that diverges between
-`apache/kafka:trunk` (Kafka `4.4.0-SNAPSHOT`, where the multi-partition
-fork currently lives) and each published Kafka release we want to target.
-Each item below is a concrete site to adapt — most are constructor
-signature changes or methods that simply did not exist yet.
+This document tracks the API surface that diverges between branches and
+the concrete adapter applied to each one. All branches share the same
+KIP-1238 patch — what differs is the stock Kafka file the patch is
+applied to and the per-version adapters layered on top.
 
 ## Source baseline
 
-`MultiPartitionTopologyTestDriver`, `MultiPartitionTestInputTopic`,
-`MultiPartitionTestOutputTopic`, `MultiPartitionTestRecord` and
-`InternalTopologyBuilderHooks` were all lifted from the
-[`SouquieresAdam/kafka` fork](https://github.com/SouquieresAdam/kafka/tree/multi-partition-test-driver-v2),
-HEAD `7f38e72285`.
+`MultiPartitionTopologyTestDriver` is built by taking the stock
+`org.apache.kafka.streams.TopologyTestDriver` of the target Kafka
+release and applying the KIP-1238 patch series from the
+[`SouquieresAdam/kafka` fork](https://github.com/SouquieresAdam/kafka/tree/multi-partition-test-driver-v2)
+(HEAD `7f38e72285`) on top via `patch --fuzz=10`.
 
-That fork is rebased on `apache/kafka` at version `4.4.0-SNAPSHOT`. Any
-divergence below is therefore a backport need, not a forward port.
+`MultiPartitionTestInputTopic` and `MultiPartitionTestOutputTopic` are
+forks of the corresponding stock classes (their package-private
+constructors take `TopologyTestDriver`, so the renamed driver type
+forces a fork). `MultiPartitionTestRecord` extends the stock
+`TestRecord` to carry the explicit partition field.
+`InternalTopologyBuilderHooks` is a split-package helper that re-derives
+the three KIP-1238 hooks from the public
+`InternalTopologyBuilder.subtopologyToTopicsInfo()` output, so no patch
+on Kafka itself is required.
 
-## Trunk-only types removed for backports
+## Per-branch matrix
 
-The following imports/usages exist in the source today and need to be
-removed (or guarded behind an adapter) when targeting any released Kafka:
-
-| Symbol | Site (line ≈) | Owning area |
-|---|---|---|
-| `AggregationWithHeaders` | imports + facade signatures | KIP-1153 (with-headers state stores) |
-| `SessionStoreWithHeaders` | imports + facade | KIP-1153 |
-| `TimestampedKeyValueStoreWithHeaders` | imports + facade | KIP-1153 |
-| `TimestampedWindowStoreWithHeaders` | imports + facade | KIP-1153 |
-| `ValueTimestampHeaders` | imports | KIP-1153 |
-| `GenericReadOnlyKeyValueStoreFacade` | imports + facade construction | trunk-only refactor |
-| `GenericReadOnlyWindowStoreFacade` | imports + facade construction | trunk-only refactor |
-| `SessionStoreIteratorFacade` | imports | trunk-only refactor |
-| `ValueConverters` | imports + facade conversion calls | trunk-only refactor |
-
-All of the above need to be either deleted (when the corresponding
-public API is also missing in target Kafka) or replaced with the
-equivalent public API of the target release.
-
-## Constructor / method signature changes
-
-| API | Trunk | Published 4.x (most recent) | 3.x range |
+| Branch | Kafka range | Tested green | Adapter delta vs the next-newer branch |
 |---|---|---|---|
-| `ProcessorStateManager(...)` | 7 args, no `ChangelogRegister`, no `stateUpdaterEnabled` | varies; see `bdca6af8c9` in upstream branch for the 4.x→trunk diff | 9-arg form with `ChangelogRegister`, `stateUpdaterEnabled` |
-| `GlobalStateUpdateTask(...)` | trunk-specific signature | needs side-by-side comparison | older signature missing `ProcessingExceptionHandler` etc. |
-| `StreamTask.prepareCommit()` | `prepareCommit(boolean)` | `prepareCommit(boolean)` (4.x) | `prepareCommit()` no-arg (older 3.x) |
-| `StateStore.commit(Map<TopicPartition, Long>)` | default method present | absent in 4.2.0 and below | absent |
-| `StateStore.committedOffset(TopicPartition)` | default method present | absent | absent |
-| `StateStore.managesOffsets()` | default method present | absent | absent |
+| `main` | 4.4.0-SNAPSHOT (trunk) | local only | source baseline; needs trunk in `mavenLocal()` |
+| `kafka-4.1-4.2` | 4.1.0 – 4.2.0 | 4.1.2, 4.2.0 | rebase on stock 4.2.0; restore 9-arg `ProcessorStateManager` (with `ChangelogRegister` + `stateUpdaterEnabled`); import `InternalTopologyBuilder.TopicsInfo` as nested |
+| `kafka-4.0` | 4.0.2 only | 4.0.2 | `StreamTask.prepareCommit()` no-arg (vs `prepareCommit(boolean)` from 4.1) |
+| `kafka-3.7-3.9` | 3.7.x – 3.9.x | 3.7.2, 3.8.1, 3.9.2 | rebase on stock 3.9.2; `StreamsConfig.defaultProductionExceptionHandler()` rename; `ProcessorStateManager.getStore()` / `GlobalStateManager.getStore()` rename (4.x dropped the `get` prefix); explicit imports for `RecordHeaders` and `ProcessorRecordContext`; `MultiPartitionTestOutputTopic` uses `driver.getQueueSize(topic)` instead of `driver.queueSize(topic)` |
 
-The 3 facade overrides for `commit`/`committedOffset`/`managesOffsets`
-have already been deleted from `MultiPartitionTopologyTestDriver` —
-that is a partial 4.2 backport step, kept on `main` because the inherited
-default behaviour (`flush()`) is acceptable for test-driver semantics.
+Each `kafka-<range>` branch's `gradle.properties` pins the default
+`kafkaVersion`. Cross-builds within the supported range are exercised
+manually with `-PkafkaVersion=<x.y.z>` before tagging.
 
-## Backport plan, ordered shortest path first
+## Versions deliberately not covered
 
-1. **Target 4.2.0** (latest published) by removing the KIP-1153 facades
-   and providing reflection or version-detection shims for the
-   `ProcessorStateManager` and `GlobalStateUpdateTask` constructors.
-2. **Target 4.1.x** — usually adds back the previous-form constructors;
-   small delta from 4.2.
-3. **Target 4.0.x** — `kafka-clients` API drift; check
-   `MockConsumer`/`MockProducer` constructor signatures.
-4. **Target 3.7+** — `ProcessorStateManager` regains
-   `ChangelogRegister` + `stateUpdaterEnabled`. Add a 3.x-specific
-   source set under `src/main/java-3.x/`.
-5. **Target 3.0+** — earliest support; `StateStoreContext` was added in
-   3.x, ensure the test driver does not assume newer interface methods.
+### 4.0.0 / 4.0.1
 
-Each target produces a published artefact tagged
-`<kafka.version>-kip1238` (see `gradle.properties`).
+Two divergences from 4.0.2:
 
-## How to run the build today
+1. `StreamsMetricsImpl(Metrics, String, String, Time)` — 4-arg form
+   that collapsed to 3-arg in 4.0.2. Pure compile fix.
+2. `StreamTask.committableOffsetsAndMetadata` calls
+   `findOffsetAndMetadata` for every input partition; on 4.0.0/4.0.1 the
+   global-table partitions are not yet pre-registered when the multi-sub
+   runtime calls `prepareCommit`, so it throws
+   *"Stream task X_Y does not know the partition: …"*. 9 of 16 tests
+   fail at runtime, including all GlobalKTable scenarios. This is a
+   behavioural divergence, not just an API rename, and would require a
+   separate registration step in the multi-sub setup path.
 
-The default `kafkaVersion=4.4.0-SNAPSHOT` requires the upstream Kafka
-fork to be installed in the local Maven cache:
+A user pinned to 4.0.0/4.0.1 should upgrade to 4.0.2 (drop-in,
+patch-level Kafka release).
+
+### 3.0.x – 3.6.x
+
+Below the Confluent Platform support window. Quick survey of compile
+errors when `kafka-3.7-3.9` is run against these versions:
+
+| Target | Errors | Sample |
+|---|---|---|
+| 3.6.2 | 7 | `StateStore.init(StateStoreContext)` was abstract; subsequent classes diverge |
+| 3.5.2 | 7 | similar to 3.6 |
+| 3.4.1 | 15 | `RecordCollector` ctor / `StreamsProducer` lifecycle changes |
+| 3.3.2 | 19 | additional `ProcessorContext` API churn |
+| 3.2.3 | 22 | `Stores.persistentTimestampedKeyValueStore` signature |
+| 3.1.2 | 47 | broad surface drift (`Cache`, `RecordQueue`) |
+| 3.0.2 | 50 | as 3.1, plus `KafkaProducer.transactionId()` etc. |
+
+These targets are tractable but the cost-to-benefit ratio is poor: they
+are out of vendor support and the test surface that would actually
+exercise multi-partition behaviour against them is small. A user who
+needs them should upgrade Kafka — the API differences are far broader
+than KIP-1238 itself.
+
+## How to build
+
+The default `gradle.properties` on each branch picks a sensible Kafka
+version for that branch. Override with `-PkafkaVersion=<x.y.z>` if you
+need to cross-build within the supported range.
+
+`main` requires the upstream Kafka fork (or any 4.4.0-SNAPSHOT clone
+sitting on the multi-partition source) installed locally:
 
 ```sh
-cd /c/repository/kafka
+cd /path/to/kafka
 ./gradlew -x test -x spotbugsMain -x spotbugsTest \
     :clients:publishToMavenLocal \
     :streams:publishToMavenLocal \
     :streams:test-utils:publishToMavenLocal
 ```
 
-Then from this repo:
-
-```sh
-./gradlew test
-```
-
-Cross-builds (`-PkafkaVersion=4.2.0` etc.) will fail until the
-corresponding backport variant lands on this repo.
+The release branches resolve everything from Maven Central.

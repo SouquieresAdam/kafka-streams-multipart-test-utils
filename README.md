@@ -22,30 +22,33 @@ topologies in unit tests today, without forking Kafka.
 
 ## Compatibility matrix
 
-| Kafka Streams | Status | Notes |
-|---|---|---|
-| 4.4.0-SNAPSHOT (apache trunk) | working source baseline | the fork was lifted directly from this revision |
-| 4.2.0 | backport in progress | requires removing trunk-only APIs (`AggregationWithHeaders`, `SessionStoreWithHeaders`, `GenericReadOnlyKeyValueStoreFacade`, `ValueConverters`) and adapting `ProcessorStateManager`/`GlobalStateUpdateTask` constructors |
-| 4.1.x | planned | inherits 4.2 backport + small adapter tweaks |
-| 4.0.x | planned | larger constructor changes |
-| 3.5.x – 3.9.x | planned | requires reflection adapters for state-store APIs |
-| 3.0.x – 3.4.x | exploratory | many `StateStore` API gaps; may need a second source set |
+| Branch | Kafka Streams range | Tested green | Notes |
+|---|---|---|---|
+| `main` | 4.4.0-SNAPSHOT (apache trunk) | local only | requires the upstream Kafka fork in `mavenLocal()` |
+| `kafka-4.1-4.2` | 4.1.0 – 4.2.0 | 4.1.2, 4.2.0 (16/16) | published Maven Central deps; default branch for Kafka 4.x users |
+| `kafka-4.0` | 4.0.2 only | 4.0.2 (16/16) | 4.0.0 / 4.0.1 skipped (see below) |
+| `kafka-3.7-3.9` | 3.7.x – 3.9.x | 3.7.2, 3.8.1, 3.9.2 (16/16) | lower bound of CFLT support; no plans to backport further |
 
-The package layout uses **split packages** (`org.apache.kafka.streams.*`) to access
-package-private internals. Kafka has no `module-info.java`, so this works on the
-classpath without `--add-opens`. Each Kafka minor version that touches those
-internals (`InternalTopologyBuilder`, `StreamTask`, `ProcessorStateManager`,
-`ProcessorContextImpl`) requires a dedicated build variant.
+The package layout uses **split packages** (`org.apache.kafka.streams.*`) to
+access package-private internals. Kafka has no `module-info.java`, so this
+works on the classpath without `--add-opens`. Each branch produces an
+artefact tagged `<kafkaVersion>-kip1238`.
 
-## Status (work in progress)
+Versions outside the table are **not supported**:
+- 4.0.0 / 4.0.1 — `StreamTask.committableOffsetsAndMetadata` throws on
+  global-table partitions; not a pure-API fix.
+- 3.0.x – 3.6.x — Confluent Platform support window has lapsed; the
+  backport surface (50+ compile errors at 3.0.2, 7 at 3.6.2) is not
+  justified by demand.
 
-This repo currently contains the **structure** of the standalone library. The
-sources are a verbatim port of the
-[`multi-partition-test-driver-v2`](https://github.com/SouquieresAdam/kafka/tree/multi-partition-test-driver-v2)
-branch, which sits on top of `apache/trunk` (Kafka `4.4.0-SNAPSHOT`). As such,
-they will **not** compile against any published Kafka release as-is. The
-backport effort tracked in `docs/COMPATIBILITY.md` enumerates the exact API
-sites that need adapters per Kafka minor version.
+## Branch model
+
+`main` tracks `apache/trunk` and is the source of truth for the
+KIP-1238 multi-partition logic. Each `kafka-<range>` branch is a sibling
+that re-bases the same logic on a stock release (`stock 4.2.0` /
+`stock 3.9.2`) and patches the API drift documented in
+`docs/COMPATIBILITY.md`. Bug fixes flow from `main` outward to the
+release branches via cherry-pick.
 
 ## Usage
 
